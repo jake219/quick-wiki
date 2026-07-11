@@ -1,6 +1,7 @@
-package com.example;
+package com.jake219.quickwiki;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.HttpUrl;
@@ -19,12 +20,106 @@ import java.util.regex.Pattern;
 public class ItemInfoClient
 {
     private static final String WIKI_API_BASE = "https://oldschool.runescape.wiki/api.php";
+    private static final String USER_AGENT = "Quick Wiki RuneLite Plugin - github.com/jake219/quick-wiki";
 
     @Inject
     private OkHttpClient okHttpClient;
 
     @Inject
     private Gson gson;
+
+    /**
+     * Resolves the exact wiki page name for a given in-game NPC/object/item ID by
+     * querying the wiki's Cargo database (structured infobox data). This avoids
+     * name-collision problems (e.g. "Alan" referring to 4 different NPCs) by
+     * matching on the precise ID stored in each page's infobox rather than guessing
+     * from a text search on the display name.
+     * <p>
+     * If no exact match is found (some pages aren't in Cargo tables), the callback
+     * receives null so callers can fall back to name-based search.
+     *
+     * @param cargoTable the ID-lookup bucket to query: "npc_id", "object_id", or "item_id"
+     * @param id         the exact in-game ID to match against
+     * @param callback   receives the exact page name, or null if no match was found
+     */
+    public void resolveExactPageName(String cargoTable, int id, Consumer<String> callback)
+    {
+        if (id < 0)
+        {
+            callback.accept(null);
+            return;
+        }
+
+        // The wiki retired the old Cargo "cargoquery" action in favor of a new "Bucket" API,
+        // which uses a query-string DSL: bucket('table').select('field').where('field','value').run()
+        // 'page_name' is a reserved column present on every bucket, referring to the page the row belongs to.
+        String query = "bucket('" + cargoTable + "').select('page_name').where('id','" + id + "').run()";
+
+        HttpUrl url = HttpUrl.parse(WIKI_API_BASE).newBuilder()
+                .addQueryParameter("action", "bucket")
+                .addQueryParameter("query", query)
+                .addQueryParameter("format", "json")
+                .build();
+
+        Request request = new Request.Builder().url(url).header("User-Agent", USER_AGENT).build();
+
+        okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
+        {
+            @Override
+            public void onFailure(okhttp3.Call call, IOException e)
+            {
+                log.warn("Failed to resolve exact page for id {} in {}", id, cargoTable, e);
+                callback.accept(null);
+            }
+
+            @Override
+            public void onResponse(okhttp3.Call call, Response response) throws IOException
+            {
+                try (response)
+                {
+                    if (!response.isSuccessful() || response.body() == null)
+                    {
+                        callback.accept(null);
+                        return;
+                    }
+
+                    String bodyStr = response.body().string();
+                    JsonObject root = gson.fromJson(bodyStr, JsonObject.class);
+
+                    if (!root.has("bucket"))
+                    {
+                        callback.accept(null);
+                        return;
+                    }
+
+                    JsonArray results = root.getAsJsonArray("bucket");
+                    if (results.size() == 0)
+                    {
+                        callback.accept(null);
+                        return;
+                    }
+
+                    JsonObject firstResult = results.get(0).getAsJsonObject();
+                    if (!firstResult.has("page_name"))
+                    {
+                        callback.accept(null);
+                        return;
+                    }
+
+                    com.google.gson.JsonElement pageNameElement = firstResult.get("page_name");
+                    String resolvedPage = pageNameElement.isJsonArray()
+                            ? pageNameElement.getAsJsonArray().get(0).getAsString()
+                            : pageNameElement.getAsString();
+                    callback.accept(resolvedPage);
+                }
+                catch (Exception e)
+                {
+                    log.warn("Failed to parse bucket query result for id {} in {}", id, cargoTable, e);
+                    callback.accept(null);
+                }
+            }
+        });
+    }
 
     public void fetchDescription(String itemName, Consumer<String> callback)
     {
@@ -64,7 +159,7 @@ public class ItemInfoClient
                 .addQueryParameter("titles", title)
                 .build();
 
-        Request request = new Request.Builder().url(url).build();
+        Request request = new Request.Builder().url(url).header("User-Agent", USER_AGENT).build();
 
         okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
         {
@@ -128,7 +223,7 @@ public class ItemInfoClient
                 .addQueryParameter("srsearch", query)
                 .build();
 
-        Request request = new Request.Builder().url(url).build();
+        Request request = new Request.Builder().url(url).header("User-Agent", USER_AGENT).build();
 
         okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
         {
@@ -181,7 +276,7 @@ public class ItemInfoClient
                 .addQueryParameter("titles", itemName)
                 .build();
 
-        Request request = new Request.Builder().url(url).build();
+        Request request = new Request.Builder().url(url).header("User-Agent", USER_AGENT).build();
 
         okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
         {
@@ -233,7 +328,7 @@ public class ItemInfoClient
 
     private void downloadImage(String imageUrl, Consumer<BufferedImage> callback)
     {
-        Request request = new Request.Builder().url(imageUrl).build();
+        Request request = new Request.Builder().url(imageUrl).header("User-Agent", USER_AGENT).build();
 
         okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
         {
@@ -279,12 +374,12 @@ public class ItemInfoClient
         public String weight;
     }
 
-    public void fetchInfobox(String itemName, Consumer<InfoboxData> callback)
+    public void fetchInfobox(String itemName, int targetItemId, Consumer<InfoboxData> callback)
     {
-        fetchInfoboxInternal(itemName, callback, false);
+        fetchInfoboxInternal(itemName, targetItemId, callback, false);
     }
 
-    private void fetchInfoboxInternal(String itemName, Consumer<InfoboxData> callback, boolean isRedirectRetry)
+    private void fetchInfoboxInternal(String itemName, int targetItemId, Consumer<InfoboxData> callback, boolean isRedirectRetry)
     {
         HttpUrl url = HttpUrl.parse(WIKI_API_BASE).newBuilder()
                 .addQueryParameter("action", "parse")
@@ -293,7 +388,7 @@ public class ItemInfoClient
                 .addQueryParameter("format", "json")
                 .build();
 
-        Request request = new Request.Builder().url(url).build();
+        Request request = new Request.Builder().url(url).header("User-Agent", USER_AGENT).build();
 
         okHttpClient.newCall(request).enqueue(new okhttp3.Callback()
         {
@@ -332,7 +427,7 @@ public class ItemInfoClient
                         String redirectTarget = extractRedirectTarget(wikitext);
                         if (redirectTarget != null)
                         {
-                            fetchInfoboxInternal(redirectTarget, callback, true);
+                            fetchInfoboxInternal(redirectTarget, targetItemId, callback, true);
                             return;
                         }
                     }
@@ -344,18 +439,20 @@ public class ItemInfoClient
                         return;
                     }
 
+                    String versionIndex = extractVersionIndexForId(infoboxBlock, targetItemId);
+
                     InfoboxData data = new InfoboxData();
 
-                    data.released = orUnknown(extractFieldWithFallback(infoboxBlock, "release", "released"));
-                    data.members = orUnknown(extractFieldWithFallback(infoboxBlock, "members", null));
-                    data.questItem = orUnknown(extractFieldWithFallback(infoboxBlock, "quest", null));
-                    data.tradeable = orUnknown(extractFieldWithFallback(infoboxBlock, "tradeable", null));
-                    data.equipable = orUnknown(extractFieldWithFallback(infoboxBlock, "equipable", null));
-                    data.stackable = orUnknown(extractFieldWithFallback(infoboxBlock, "stackable", null));
-                    data.noteable = orUnknown(extractFieldWithFallback(infoboxBlock, "noteable", null));
-                    data.options = orUnknown(extractFieldWithFallback(infoboxBlock, "options", null));
-                    data.value = orUnknown(extractFieldWithFallback(infoboxBlock, "value", null));
-                    data.weight = orUnknown(extractFieldWithFallback(infoboxBlock, "weight", null));
+                    data.released = orUnknown(extractFieldWithFallback(infoboxBlock, "release", "released", versionIndex));
+                    data.members = orUnknown(extractFieldWithFallback(infoboxBlock, "members", null, versionIndex));
+                    data.questItem = orUnknown(extractFieldWithFallback(infoboxBlock, "quest", null, versionIndex));
+                    data.tradeable = orUnknown(extractFieldWithFallback(infoboxBlock, "tradeable", null, versionIndex));
+                    data.equipable = orUnknown(extractFieldWithFallback(infoboxBlock, "equipable", null, versionIndex));
+                    data.stackable = orUnknown(extractFieldWithFallback(infoboxBlock, "stackable", null, versionIndex));
+                    data.noteable = orUnknown(extractFieldWithFallback(infoboxBlock, "noteable", null, versionIndex));
+                    data.options = orUnknown(extractFieldWithFallback(infoboxBlock, "options", null, versionIndex));
+                    data.value = orUnknown(extractFieldWithFallback(infoboxBlock, "value", null, versionIndex));
+                    data.weight = orUnknown(extractFieldWithFallback(infoboxBlock, "weight", null, versionIndex));
 
                     callback.accept(data);
                 }
@@ -422,8 +519,67 @@ public class ItemInfoClient
         return wikitext.substring(start);
     }
 
-    private String extractFieldWithFallback(String block, String primaryName, String altName)
+    /**
+     * Determines which numbered "version" of a switch infobox matches our target item ID,
+     * by scanning the id/id1/id2/... fields (which list the item ID(s) for each version) and
+     * finding which version number contains our target ID. Returns null if the infobox has no
+     * versions, or none match (in which case callers fall back to unsuffixed/generic fields).
+     */
+    private String extractVersionIndexForId(String block, int targetId)
     {
+        if (targetId < 0)
+        {
+            return null;
+        }
+
+        Pattern pattern = Pattern.compile("\\|\\s*id(\\d*)\\s*=\\s*([^\\|\\n\\}]+)");
+        Matcher matcher = pattern.matcher(block);
+        while (matcher.find())
+        {
+            String indexStr = matcher.group(1);
+            if (indexStr.isEmpty())
+            {
+                continue;
+            }
+
+            for (String part : matcher.group(2).split(","))
+            {
+                try
+                {
+                    if (Integer.parseInt(part.trim()) == targetId)
+                    {
+                        return indexStr;
+                    }
+                }
+                catch (NumberFormatException ignored)
+                {
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private String extractFieldWithFallback(String block, String primaryName, String altName, String versionIndex)
+    {
+        if (versionIndex != null)
+        {
+            String value = extractField(block, primaryName + versionIndex);
+            if (value != null)
+            {
+                return value;
+            }
+
+            if (altName != null)
+            {
+                value = extractField(block, altName + versionIndex);
+                if (value != null)
+                {
+                    return value;
+                }
+            }
+        }
+
         String value = extractField(block, primaryName);
         if (value != null)
         {

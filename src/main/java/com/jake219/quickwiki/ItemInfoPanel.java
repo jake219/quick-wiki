@@ -1,4 +1,4 @@
-package com.example;
+package com.jake219.quickwiki;
 
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;

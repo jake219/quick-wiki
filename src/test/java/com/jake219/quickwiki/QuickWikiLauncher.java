@@ -1,9 +1,8 @@
-package com.example;
-import net.runelite.client.callback.ClientThread;
+package com.jake219.quickwiki;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 import net.runelite.client.RuneLite;
 
-public class ItemInfoPluginTest
+public class QuickWikiLauncher
 {
     public static void main(String[] args) throws Exception
     {
