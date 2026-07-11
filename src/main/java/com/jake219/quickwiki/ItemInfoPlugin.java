@@ -9,7 +9,7 @@ import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.client.callback.ClientThread;
-
+import net.runelite.client.util.ImageUtil;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
@@ -18,11 +18,6 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 
 import javax.swing.SwingUtilities;
-import java.awt.Color;
-import java.awt.Font;
-import java.awt.FontMetrics;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 
 @PluginDescriptor(
@@ -55,7 +50,7 @@ public class ItemInfoPlugin extends Plugin
     {
         panel = new ItemInfoPanel();
 
-        final BufferedImage icon = createIcon();
+        final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/com/jake219/quickwiki/icon.png");
 
         navButton = NavigationButton.builder()
                 .tooltip("Quick Wiki")
@@ -73,36 +68,7 @@ public class ItemInfoPlugin extends Plugin
         clientToolbar.removeNavigation(navButton);
     }
 
-    private BufferedImage createIcon()
-    {
-        BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
-        g.setColor(new Color(255, 152, 31));
-        g.fillRoundRect(0, 0, 16, 16, 4, 4);
-
-        g.setColor(Color.WHITE);
-        g.setFont(new Font("Arial", Font.BOLD, 9));
-        FontMetrics metrics = g.getFontMetrics();
-
-        String first = "Q";
-        String second = "W";
-        int firstWidth = metrics.stringWidth(first);
-        int secondWidth = metrics.stringWidth(second);
-        int overlap = 0;
-        int totalWidth = firstWidth + secondWidth - overlap;
-
-        int x = (16 - totalWidth) / 2;
-        int y = (16 - metrics.getHeight()) / 2 + metrics.getAscent();
-
-        g.drawString(first, x, y);
-        g.drawString(second, x + firstWidth - overlap, y);
-
-        g.dispose();
-        return image;
-    }
 
     @Subscribe
     public void onMenuEntryAdded(MenuEntryAdded event)
