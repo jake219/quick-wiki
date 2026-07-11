@@ -2,12 +2,14 @@ package com.jake219.quickwiki;
 
 import javax.inject.Inject;
 import net.runelite.api.Client;
+import net.runelite.api.InventoryID;
+import net.runelite.api.Item;
+import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuAction;
 import net.runelite.api.NPC;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.client.callback.ClientThread;
-import java.awt.FontMetrics;
-import java.awt.RenderingHints;
+
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
@@ -18,7 +20,9 @@ import net.runelite.client.ui.NavigationButton;
 import javax.swing.SwingUtilities;
 import java.awt.Color;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 
 @PluginDescriptor(
@@ -87,7 +91,7 @@ public class ItemInfoPlugin extends Plugin
         String second = "W";
         int firstWidth = metrics.stringWidth(first);
         int secondWidth = metrics.stringWidth(second);
-        int overlap = 0; // tighten the gap between letters so both fit comfortably
+        int overlap = 0;
         int totalWidth = firstWidth + secondWidth - overlap;
 
         int x = (16 - totalWidth) / 2;
@@ -174,6 +178,39 @@ public class ItemInfoPlugin extends Plugin
         }
     }
 
+    /**
+     * Searches a specific item container (equipment or inventory) for an item whose real
+     * composition name exactly matches what was clicked, returning its canonicalized ID.
+     * This is a defensive cross-check for cases where the menu event's reported item ID
+     * doesn't match reality (observed with equipped chargeable gear).
+     *
+     * @return the matching item's canonicalized ID, or -1 if no exact match was found
+     */
+    private int findExactNameMatchInContainer(InventoryID inventoryId, String targetName)
+    {
+        ItemContainer container = client.getItemContainer(inventoryId);
+        if (container == null)
+        {
+            return -1;
+        }
+
+        for (Item item : container.getItems())
+        {
+            if (item == null || item.getId() <= 0)
+            {
+                continue;
+            }
+
+            int canonicalId = itemManager.canonicalize(item.getId());
+            if (itemManager.getItemComposition(canonicalId).getName().equalsIgnoreCase(targetName))
+            {
+                return canonicalId;
+            }
+        }
+
+        return -1;
+    }
+
     private void handleWikiClick(String category, String name, int menuIdentifier, int itemId)
     {
         final int gameId = resolveGameId(category, menuIdentifier);
@@ -193,10 +230,13 @@ public class ItemInfoPlugin extends Plugin
 
         if (category.equals("ITEM"))
         {
-            // itemId comes straight from MenuEntryAdded.getItemId(), which RuneLite resolves
-            // correctly regardless of where the item was - inventory, bank, shop, equipment,
-            // or ground. Only fall back to a name-based search (which can grab the wrong
-            // variant when multiple items share a display name) if that's unavailable.
+            // itemId comes straight from MenuEntryAdded.getItemId(). This is reliable for
+            // inventory items, but for equipped gear it can sometimes report the item's base
+            // "display" ID rather than the actual charged/uncharged variant sitting in the
+            // equipment slot (e.g. a charged Pendant of ates resolving as the uncharged one).
+            // We verify the resolved item's real name matches what was actually clicked, and
+            // if not, search the player's equipment and inventory directly for an exact name
+            // match before falling back to a broader text search.
             BufferedImage image = null;
             int price = 0;
             int highAlch = 0;
@@ -205,7 +245,21 @@ public class ItemInfoPlugin extends Plugin
 
             if (itemId >= 0)
             {
-                resolvedItemId = itemManager.canonicalize(itemId);
+                int candidateId = itemManager.canonicalize(itemId);
+                if (itemManager.getItemComposition(candidateId).getName().equalsIgnoreCase(name))
+                {
+                    resolvedItemId = candidateId;
+                }
+            }
+
+            if (resolvedItemId < 0)
+            {
+                resolvedItemId = findExactNameMatchInContainer(InventoryID.EQUIPMENT, name);
+            }
+
+            if (resolvedItemId < 0)
+            {
+                resolvedItemId = findExactNameMatchInContainer(InventoryID.INVENTORY, name);
             }
 
             if (resolvedItemId < 0)
