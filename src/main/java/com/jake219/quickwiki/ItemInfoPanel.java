@@ -1,5 +1,6 @@
 package com.jake219.quickwiki;
 
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 
@@ -16,6 +17,7 @@ import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+@Slf4j
 public class ItemInfoPanel extends PluginPanel
 {
     private final JLabel nameLabel = new JLabel();
@@ -77,11 +79,8 @@ public class ItemInfoPanel extends PluginPanel
      * (already stripped of any sub-location suffix for monster names). */
     /** Registered by the plugin, since only it has access to game/client resources needed
      * to actually resolve and display a clicked drop-row name. Receives the clicked name
-     * (already stripped of any sub-location suffix for monster names) plus whether that
-     * name represents an NPC (true) or an item (false), since a name clicked while viewing
-     * an item's own drops is a monster name, while a name clicked while viewing an NPC's
-     * own drops is an item name. */
-    private java.util.function.BiConsumer<String, Boolean> dropRowClickListener;
+     * (already stripped of any sub-location suffix for monster names). */
+    private Consumer<String> dropRowClickListener;
     /** Registered by the plugin - fired when the back button is clicked. */
     private Runnable backButtonListener;
     private boolean itemSourcesHovering = false;
@@ -486,7 +485,7 @@ public class ItemInfoPanel extends PluginPanel
         }
         catch (Exception e)
         {
-            System.err.println("Quick Wiki: failed to open " + url + " - " + e.getMessage());
+            log.warn("Quick Wiki: failed to open {}", url, e);
         }
     }
 
@@ -1371,7 +1370,7 @@ public class ItemInfoPanel extends PluginPanel
      * itself has no access to game/client resources needed to actually resolve and display
      * the clicked item/NPC, so this is wired up once by the plugin at startup.
      */
-    public void setDropRowClickListener(java.util.function.BiConsumer<String, Boolean> listener)
+    public void setDropRowClickListener(Consumer<String> listener)
     {
         this.dropRowClickListener = listener;
     }
@@ -1395,20 +1394,29 @@ public class ItemInfoPanel extends PluginPanel
 
     /**
      * Strips a sub-location suffix like " (Wilderness Slayer Cave)" before using a clicked
-     * name for navigation - but only for monster names (where that suffix was artificially
-     * added by formatSourceName). Item names never get stripped, since a parenthetical
-     * suffix there can be part of the item's real, distinct wiki page name (e.g. "Ring of
-     * wealth (5)"). isNpcRow is passed in explicitly per-row (rather than inferred from
-     * panel-wide state), so this stays correct regardless of which section a row is in.
+     * name for navigation - but only when viewing an item's own drops (where that suffix
+     * was artificially added by formatSourceName for monster names). When viewing an NPC's
+     * drops (item names), a parenthetical suffix can be part of the item's real, distinct
+     * wiki page name (e.g. "Ring of wealth (5)"), so nothing is stripped in that direction.
      */
-    private String stripSubLocationForNav(String name, boolean isNpcRow)
+    private String stripSubLocationForNav(String name)
     {
-        if (!isNpcRow)
+        if (npcDropsMode)
         {
             return name;
         }
         int idx = name.indexOf(" (");
         return idx > 0 ? name.substring(0, idx) : name;
+    }
+
+    /**
+     * Lets the plugin's drop-row click listener tell which lookup flow to use: a name
+     * clicked while viewing an item's own drops is a monster name, while a name clicked
+     * while viewing an NPC's own drops is an item name.
+     */
+    public boolean isNpcDropsMode()
+    {
+        return npcDropsMode;
     }
 
     /**
@@ -1931,7 +1939,7 @@ public class ItemInfoPanel extends PluginPanel
         {
             for (ItemInfoClient.DropSource drop : cachedDrops)
             {
-                dropsContent.add(buildDropRow(drop, !npcDropsMode));
+                dropsContent.add(buildDropRow(drop));
             }
         }
 
@@ -1977,7 +1985,7 @@ public class ItemInfoPanel extends PluginPanel
      * like "100-150 (noted)" collided with the drop rate text), so every line here is
      * independently wrap-safe instead.
      */
-    private JPanel buildDropRow(ItemInfoClient.DropSource drop, boolean rowIsNpc)
+    private JPanel buildDropRow(ItemInfoClient.DropSource drop)
     {
         JPanel row = new JPanel();
         row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
@@ -2002,7 +2010,7 @@ public class ItemInfoPanel extends PluginPanel
                 @Override
                 public void mousePressed(MouseEvent e)
                 {
-                    dropRowClickListener.accept(stripSubLocationForNav(rawName, rowIsNpc), rowIsNpc);
+                    dropRowClickListener.accept(stripSubLocationForNav(rawName));
                 }
 
                 @Override

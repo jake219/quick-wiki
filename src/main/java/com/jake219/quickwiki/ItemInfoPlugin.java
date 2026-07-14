@@ -152,15 +152,15 @@ public class ItemInfoPlugin extends Plugin
         // same as if it had been examined directly. The panel only knows the clicked name
         // and which mode it was in when clicked; the actual resolve-and-display logic needs
         // client/item-manager access the panel doesn't have, so it lives here.
-        panel.setDropRowClickListener((clickedName, isNpc) ->
+        panel.setDropRowClickListener(clickedName ->
         {
-            if (isNpc)
+            if (panel.isNpcDropsMode())
             {
-                showNpcByName(clickedName, -1, true);
+                showItemByName(clickedName, -1, true);
             }
             else
             {
-                showItemByName(clickedName, -1, true);
+                showNpcByName(clickedName, -1, true);
             }
         });
         panel.setBackButtonListener(this::goBack);
