@@ -8,12 +8,6 @@ Examining an item, NPC, or object in-game just gives you a one-line description 
 
 This puts all of that directly in a side panel inside the client itself. No alt-tab, no second window, no losing your place. You stay in the game the whole time.
 
-<table>
-<tr>
-<td><img src="screenshot.png" height="580"></td>
-<td><img src="demo.gif" height="580"></td>
-</tr>
-</table>
 
 ## Features
 
@@ -23,25 +17,30 @@ This puts all of that directly in a side panel inside the client itself. No alt-
 - **Click-through navigation** — click any monster in an item's drop sources, or any item in a monster's drop table, to jump straight to that page's own info. A back button returns you to wherever you started
 - **Shops** — see every shop that sells an item and at what price, including non-GP currencies like Slayer Reward points
 
-<img src="properties.png" height="500">
+<div align="center">
+<table>
+<tr>
+<td align="center"><b>Properties</b><br><img src="properties.png" width="260"></td>
+<td align="center"><b>Item sources</b><br><img src="item-sources.gif" width="260"></td>
+</tr>
+<tr>
+<td align="center"><b>NPC drops and stats</b><br><img src="npc-drops.png" width="260"></td>
+<td align="center"><b>Click-through navigation</b><br><img src="navigation.gif" width="260"></td>
+</tr>
+</table>
+</div>
 
 ## Item sources
 
 Expand "Item Sources" on any item to see every monster that drops it and every shop that sells it, sorted most-common-first with color-coded drop rates.
 
-<img src="item-sources.gif" height="500">
-
 ## NPC drops and stats
 
 Right-click any monster to see its full combat stats and its own drop table — no need to look up the item first to find out what drops it.
 
-<img src="npc-drops.png" height="500">
-
 ## Jump between pages without leaving the panel
 
 Click any item or monster name inside a drop table to go straight to its own page. Use the back button (top-left) to return to whatever you originally looked up.
-
-<img src="navigation.gif" height="500">
 
 ## Accuracy
 
