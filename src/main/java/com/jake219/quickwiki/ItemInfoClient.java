@@ -1462,7 +1462,14 @@ public class ItemInfoClient
 
     private String extractField(String block, String fieldName)
     {
-        Pattern pattern = Pattern.compile("\\|\\s*" + Pattern.quote(fieldName) + "\\s*=\\s*([^\\|\\n\\}]+)");
+        // The lookahead stops at either "newline + next |field" or "newline + }}" (the
+        // infobox's own closing, which in properly-formatted wikitext is always on its own
+        // line) - NOT at any lone '}' character. The old version excluded '}' entirely from
+        // the captured value, which incorrectly truncated fields containing a nested
+        // template like "{{*}}" (a bullet-point marker some quest lists use) right at its
+        // first closing brace, e.g. capturing just "{{*" instead of the full value.
+        Pattern pattern = Pattern.compile("\\|\\s*" + Pattern.quote(fieldName)
+                + "\\s*=\\s*(.*?)(?=\\n\\s*\\||\\n\\s*\\}\\})");
         Matcher matcher = pattern.matcher(block);
         if (matcher.find())
         {
@@ -1474,7 +1481,14 @@ public class ItemInfoClient
     private String cleanWikiValue(String raw)
     {
         String cleaned = raw.replaceAll("\\[\\[(?:[^|\\]]*\\|)?([^\\]]*)\\]\\]", "$1");
-        cleaned = cleaned.replaceAll("\\{\\{[^}]*\\}\\}", "").trim();
+        cleaned = cleaned.replaceAll("\\{\\{[^}]*\\}\\}", "");
+        // Quest/reward-style fields often list multiple entries separated by <br/> tags
+        // (e.g. "{{*}} [[Cook's Assistant]]<br/>{{*}} [[Recipe for Disaster]]") - without
+        // this, the literal "<br/>" text was showing up in the display instead of being
+        // treated as a separator between entries.
+        cleaned = cleaned.replaceAll("(?i)<br\\s*/?>", ", ");
+        cleaned = cleaned.replaceAll("\\s+", " ").trim();
+        cleaned = cleaned.replaceAll("^,\\s*|,\\s*$", "").replaceAll(",\\s*,", ",");
         return cleaned.isEmpty() ? "Unknown" : cleaned;
     }
 }
