@@ -1468,8 +1468,17 @@ public class ItemInfoClient
         // the captured value, which incorrectly truncated fields containing a nested
         // template like "{{*}}" (a bullet-point marker some quest lists use) right at its
         // first closing brace, e.g. capturing just "{{*" instead of the full value.
+        //
+        // [ \t]* (not \s*) is used immediately around the "=" sign specifically - \s*
+        // matches newlines too, so for a field with an EMPTY value (e.g. "|release1 = "
+        // immediately followed by a newline), the greedy \s* right after "=" would consume
+        // that newline and keep going, landing at the start of the NEXT field's line before
+        // the capture group even begins - confirmed via a real Bow cabinet page, where an
+        // empty "|release1 =" field caused the literal text "|release2 = " to be captured
+        // as if it were release1's own value. [ \t]* only skips same-line whitespace, so an
+        // empty value correctly stays empty instead of bleeding into the next field.
         Pattern pattern = Pattern.compile("\\|\\s*" + Pattern.quote(fieldName)
-                + "\\s*=\\s*(.*?)(?=\\n\\s*\\||\\n\\s*\\}\\})");
+                + "[ \\t]*=[ \\t]*(.*?)(?=\\n\\s*\\||\\n\\s*\\}\\})");
         Matcher matcher = pattern.matcher(block);
         if (matcher.find())
         {
