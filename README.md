@@ -20,12 +20,10 @@ This puts all of that directly in a side panel inside the client itself. No alt-
 <div align="center">
 <table>
 <tr>
-<td align="center"><b>Properties</b><br><img src="properties.png" width="260"></td>
+
 <td align="center"><b>Item sources</b><br><img src="item-sources.gif" width="260"></td>
-</tr>
-<tr>
 <td align="center"><b>NPC drops and stats</b><br><img src="npc-drops.png" width="260"></td>
-<td align="center"><b>Click-through navigation</b><br><img src="navigation.gif" width="260"></td>
+
 </tr>
 </table>
 </div>
