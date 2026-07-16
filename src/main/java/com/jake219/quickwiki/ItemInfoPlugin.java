@@ -1,6 +1,12 @@
 package com.jake219.quickwiki;
 
 import javax.inject.Inject;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -282,6 +288,120 @@ public class ItemInfoPlugin extends Plugin
      * skill it's for (e.g. a Coal rock's "level 30" is a Mining level). Returns null for
      * "combat", "reward", or anything else that isn't an actual skill name.
      */
+    /**
+     * Resolves and fetches an icon for every unique item name in an NPC's drop list, then
+     * displays the drops with those icons attached. Deduped by name first since a drop
+     * table can list the same item many times at different quantities/rarities (e.g.
+     * Goblin's "Coins" appears 5 times across its two drop tables) - no point firing the
+     * same lookup+fetch more than once. Uses the same navigationGeneration guard as every
+     * other async panel update, so a slow-resolving icon batch from a page the user has
+     * already left can't overwrite whatever they've navigated to since.
+     */
+    /**
+     * Caches item name -> resolved ID across the whole plugin session, not just within one
+     * drop table load. Common items (Coins, runes, bones) show up in dozens of different
+     * monsters' drop tables, so without this every single examine re-asks the wiki for
+     * something we've already resolved. -1 is used as a sentinel for "confirmed
+     * unresolvable" (e.g. Clue scroll (elite), which the wiki's bucket has no clean
+     * canonical ID for) - caching the failure too means we don't keep re-attempting a
+     * lookup we already know won't succeed, since that's just as wasteful as re-fetching a
+     * success would be.
+     */
+    private final Map<String, Integer> resolvedItemIdCache = new ConcurrentHashMap<>();
+    private final Map<Integer, BufferedImage> itemIconCache = new ConcurrentHashMap<>();
+
+    private void loadNpcDropIconsAndDisplay(List<ItemInfoClient.DropSource> drops, int myGen)
+    {
+        Set<String> uniqueNames = new LinkedHashSet<>();
+        if (drops != null)
+        {
+            for (ItemInfoClient.DropSource drop : drops)
+            {
+                if (drop.source != null)
+                {
+                    uniqueNames.add(drop.source);
+                }
+            }
+        }
+
+        if (uniqueNames.isEmpty())
+        {
+            SwingUtilities.invokeLater(() ->
+            {
+                if (navigationGeneration.get() == myGen)
+                {
+                    panel.setSources(drops, null);
+                }
+            });
+            return;
+        }
+
+        // Split into "already known" (cache hit, either a real icon or a confirmed
+        // failure) vs "needs an actual lookup" - cached icons are shown immediately below,
+        // only genuinely new lookups get a per-row spinner.
+        Map<String, BufferedImage> knownIcons = new ConcurrentHashMap<>();
+        List<String> namesNeedingLookup = new ArrayList<>();
+        for (String itemName : uniqueNames)
+        {
+            Integer cachedId = resolvedItemIdCache.get(itemName);
+            if (cachedId != null)
+            {
+                if (cachedId >= 0)
+                {
+                    BufferedImage cachedIcon = itemIconCache.get(cachedId);
+                    if (cachedIcon != null)
+                    {
+                        knownIcons.put(itemName, cachedIcon);
+                    }
+                }
+                // cachedId == -1 (confirmed unresolvable) needs nothing further
+            }
+            else
+            {
+                namesNeedingLookup.add(itemName);
+            }
+        }
+
+        // Rows render right away - cached icons appear immediately, anything still being
+        // looked up shows a spinner instead of leaving the whole table waiting on the
+        // slowest item. Each remaining icon gets applied individually via updateDropIcon()
+        // as its own lookup finishes, rather than one big wait before anything appears.
+        SwingUtilities.invokeLater(() ->
+        {
+            if (navigationGeneration.get() == myGen)
+            {
+                panel.setSourcesWithLoadingIcons(drops, null, knownIcons);
+            }
+        });
+
+        for (String itemName : namesNeedingLookup)
+        {
+            itemInfoClient.resolveItemIdByName(itemName, resolvedId ->
+            {
+                resolvedItemIdCache.put(itemName, resolvedId != null ? resolvedId : -1);
+
+                if (resolvedId != null)
+                {
+                    clientThread.invoke(() ->
+                    {
+                        BufferedImage image = itemManager.getImage(resolvedId, 1, false);
+                        if (image != null)
+                        {
+                            itemIconCache.put(resolvedId, image);
+                            SwingUtilities.invokeLater(() ->
+                            {
+                                if (navigationGeneration.get() == myGen)
+                                {
+                                    panel.updateDropIcon(itemName, image);
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+        }
+    }
+
     private BufferedImage skillIconForDropType(String dropType)
     {
         if (dropType == null)
@@ -590,13 +710,7 @@ public class ItemInfoPlugin extends Plugin
                             panel.setNpcDropsMode(true);
                             panel.setSourcesLoader(() ->
                                     itemInfoClient.fetchNpcDrops(pageName, drops ->
-                                            SwingUtilities.invokeLater(() ->
-                                            {
-                                                if (navigationGeneration.get() == myGen)
-                                                {
-                                                    panel.setSources(drops, null);
-                                                }
-                                            })));
+                                            loadNpcDropIconsAndDisplay(drops, myGen)));
                         });
                     }
                     else
@@ -689,13 +803,7 @@ public class ItemInfoPlugin extends Plugin
             panel.setNpcDropsMode(true);
             panel.setSourcesLoader(() ->
                     itemInfoClient.fetchNpcDrops(npcName, drops ->
-                            SwingUtilities.invokeLater(() ->
-                            {
-                                if (navigationGeneration.get() == myGen)
-                                {
-                                    panel.setSources(drops, null);
-                                }
-                            })));
+                            loadNpcDropIconsAndDisplay(drops, myGen)));
         });
     }
 

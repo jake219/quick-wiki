@@ -227,8 +227,13 @@ public class ItemInfoClient
      */
     public void fetchNpcDrops(String npcName, Consumer<List<DropSource>> callback)
     {
+        // limit(500), not 50 - confirmed via a real user report that Zulrah's drop table
+        // (unique drops + tertiary + common loot across overlapping phase tables) exceeds
+        // 50 total entries, silently truncating items like Antidote++(4) that happened to
+        // fall past whatever the bucket's internal ordering put in the first 50. The same
+        // risk applies to any monster with a large enough table, not just Zulrah.
         String query = "bucket('dropsline').select('item_name','drop_json')"
-                + ".where('page_name','" + escapeForBucketQuery(npcName) + "').limit(50).run()";
+                + ".where('page_name','" + escapeForBucketQuery(npcName) + "').limit(500).run()";
 
         runBucketQuery(query, root -> callback.accept(parseNpcDropRows(root, npcName)));
     }
@@ -324,7 +329,7 @@ public class ItemInfoClient
         // rather than as flattened top-level fields - see parseDropRows below for the
         // confirmed blob key names.
         String query = "bucket('dropsline').select('page_name','drop_json')"
-                + ".where('item_name','" + escapeForBucketQuery(itemName) + "').limit(50).run()";
+                + ".where('item_name','" + escapeForBucketQuery(itemName) + "').limit(500).run()";
 
         runBucketQuery(query, root -> callback.accept(parseDropRows(root, itemName)));
     }
@@ -477,7 +482,16 @@ public class ItemInfoClient
                         }
                     }
 
-                    if (ds.source != null)
+                    // Ammo-recycling equipment mechanics (Ranging cape#assembler, Ava's
+                    // assembler, Assembler max cape, etc.) get tracked in this same
+                    // dropsline bucket as genuine combat drops - confirmed via live data
+                    // (Mithril arrow) that these are actually equipment mechanics (Ava's
+                    // devices recover ammo ~98.75% of the time), not monster/reward drops.
+                    // All confirmed variants share the word "assembler" in their source
+                    // name, which reliably identifies this specific mechanic family
+                    // without needing to hardcode every exact page name (e.g. this also
+                    // catches "Masori assembler" automatically).
+                    if (ds.source != null && !ds.source.toLowerCase().contains("assembler"))
                     {
                         results.add(ds);
                     }
@@ -531,7 +545,7 @@ public class ItemInfoClient
     private void fetchShopSources(String itemName, Consumer<List<ShopSource>> callback)
     {
         String query = "bucket('storeline').select('sold_by','store_sell_price','store_currency')"
-                + ".where('sold_item','" + escapeForBucketQuery(itemName) + "').limit(50).run()";
+                + ".where('sold_item','" + escapeForBucketQuery(itemName) + "').limit(500).run()";
 
         runBucketQuery(query, root ->
         {
@@ -660,6 +674,21 @@ public class ItemInfoClient
      * 'item_id' bucket. Note the result's "id" field comes back as a JSON array (e.g.
      * {"id":["300"]}), not a plain value - presumably to support multi-version items.
      *
+     * If the direct lookup finds nothing, falls back to the 'infobox_item' bucket, queried
+     * by 'item_name' instead of 'page_name' - confirmed via live testing that this
+     * correctly resolves cases 'item_id' misses entirely, for two different reasons:
+     * - "Antidote++(4)" isn't its own page at all (it redirects to a shared "Antidote++"
+     *   article with four dose variants) - item_id only indexes canonical page titles, but
+     *   infobox_item is indexed by item_name and finds it directly, no redirect-following
+     *   needed.
+     * - "Key (medium)" resolves to ELEVEN different IDs (different guards/contexts drop
+     *   different underlying item variants that all display as "Key (medium)") - since
+     *   they're all the same icon visually, the first one is used rather than needing to
+     *   disambiguate further.
+     * This replaced an earlier, much more complex implementation that manually followed
+     * redirects and matched per-version "nameN" infobox fields - infobox_item turned out to
+     * already handle both of those cases (and more) in a single query.
+     *
      * @param callback receives the resolved ID, or null if the item couldn't be resolved
      */
     public void resolveItemIdByName(String itemName, Consumer<Integer> callback)
@@ -680,9 +709,30 @@ public class ItemInfoClient
                         if (row.has("id"))
                         {
                             JsonArray idArray = row.getAsJsonArray("id");
-                            if (idArray.size() > 0)
+                            // Some items (e.g. Clue scroll (elite)) don't have one single
+                            // canonical ID the wiki considers definitive, and the bucket
+                            // returns the literal string "N/A" instead of a number in that
+                            // case - confirmed via a real runtime log. This array can also
+                            // hold multiple historical IDs for a single page (same root
+                            // cause as infobox_item's multi-ID case below) - scanning for
+                            // the largest valid numeric value rather than trusting the
+                            // first element handles both cases the same way.
+                            int bestId = -1;
+                            for (JsonElement idElement : idArray)
                             {
-                                callback.accept(idArray.get(0).getAsInt());
+                                String idStr = idElement.getAsString();
+                                if (idStr.matches("\\d+"))
+                                {
+                                    int id = Integer.parseInt(idStr);
+                                    if (id > bestId)
+                                    {
+                                        bestId = id;
+                                    }
+                                }
+                            }
+                            if (bestId >= 0)
+                            {
+                                callback.accept(bestId);
                                 return;
                             }
                         }
@@ -692,6 +742,68 @@ public class ItemInfoClient
             catch (Exception e)
             {
                 log.warn("Failed to resolve item id for {}", itemName, e);
+                callback.accept(null);
+                return;
+            }
+            resolveItemIdViaInfoboxItem(itemName, callback);
+        });
+    }
+
+    /**
+     * Some items (clue scrolls especially) have gone through many graphical reworks over
+     * the years, each apparently keeping its own tracked ID under the same display name -
+     * confirmed via a live query returning 150+ IDs for "Clue scroll (medium)" alone,
+     * including outright junk values ("undefined", "hist2841"). With no explicit ordering,
+     * taking just the first result was effectively arbitrary - it could easily land on a
+     * defunct, years-old ID with no valid sprite in the current game client, causing the
+     * icon to silently fail even though an ID was "resolved". Instead, this scans every
+     * candidate across all returned rows and takes the largest valid numeric ID, since
+     * OSRS generally assigns higher IDs to more recently-added items - a reasonable
+     * heuristic for "the current version" rather than an arbitrary pick.
+     */
+    private void resolveItemIdViaInfoboxItem(String itemName, Consumer<Integer> callback)
+    {
+        String query = "bucket('infobox_item').select('item_id')"
+                + ".where('item_name','" + escapeForBucketQuery(itemName) + "').limit(200).run()";
+
+        runBucketQuery(query, root ->
+        {
+            try
+            {
+                if (root != null && root.has("bucket"))
+                {
+                    JsonArray bucket = root.getAsJsonArray("bucket");
+                    int bestId = -1;
+                    for (JsonElement rowElement : bucket)
+                    {
+                        JsonObject row = rowElement.getAsJsonObject();
+                        if (row.has("item_id"))
+                        {
+                            JsonArray idArray = row.getAsJsonArray("item_id");
+                            for (JsonElement idElement : idArray)
+                            {
+                                String idStr = idElement.getAsString();
+                                if (idStr.matches("\\d+"))
+                                {
+                                    int id = Integer.parseInt(idStr);
+                                    if (id > bestId)
+                                    {
+                                        bestId = id;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (bestId >= 0)
+                    {
+                        callback.accept(bestId);
+                        return;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                log.warn("Failed to resolve item id via infobox_item for {}", itemName, e);
             }
             callback.accept(null);
         });

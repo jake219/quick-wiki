@@ -11,7 +11,9 @@ import java.awt.event.MouseEvent;
 import java.awt.geom.RoundRectangle2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -48,7 +50,7 @@ public class ItemInfoPanel extends PluginPanel
     private JScrollPane dropsScrollPane;
     /** Max height (px) the Drops list grows to before it starts scrolling internally,
      * keeping the "Drops" header fixed in place above it. */
-    private static final int SOURCES_MAX_HEIGHT = 500;
+    private static final int SOURCES_MAX_HEIGHT = 375;
     private static final int DESCRIPTION_MAX_HEIGHT = 400;
     private JPanel shopsContent;
     private JScrollPane shopsScrollPane;
@@ -99,6 +101,9 @@ public class ItemInfoPanel extends PluginPanel
     /** Cached once the combined fetch resolves, so re-collapsing/re-expanding afterward
      * doesn't need to re-fetch or re-build anything. */
     private List<ItemInfoClient.DropSource> cachedDrops;
+    /** item name -> every currently-visible row's icon label showing that item, so a
+     * resolved icon can be applied to all matching rows at once via updateDropIcon(). */
+    private final Map<String, List<JLabel>> dropIconLabels = new HashMap<>();
     private List<ItemInfoClient.ShopSource> cachedShops;
 
     /**
@@ -265,9 +270,21 @@ public class ItemInfoPanel extends PluginPanel
         iconNamePanel.setLayout(new BoxLayout(iconNamePanel, BoxLayout.Y_AXIS));
         iconNamePanel.add(backButtonLabel);
         iconNamePanel.add(Box.createVerticalStrut(6));
-        iconNamePanel.add(iconLabel);
-        iconNamePanel.add(Box.createVerticalStrut(8));
-        iconNamePanel.add(nameLabel);
+
+        // Icon and name sit side-by-side rather than stacked - saves a full row of
+        // vertical space that stacking used to cost, freeing up room elsewhere in the
+        // panel (e.g. for larger property text) without growing the overall height.
+        JPanel iconNameRow = new JPanel();
+        iconNameRow.setLayout(new BoxLayout(iconNameRow, BoxLayout.X_AXIS));
+        iconNameRow.setOpaque(false);
+        iconNameRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        iconLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+        nameLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+        iconNameRow.add(iconLabel);
+        iconNameRow.add(Box.createHorizontalStrut(10));
+        iconNameRow.add(nameLabel);
+
+        iconNamePanel.add(iconNameRow);
         iconNamePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         iconNamePanel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
@@ -1022,6 +1039,44 @@ public class ItemInfoPanel extends PluginPanel
     }
 
     /**
+     * A simple dimmed circle outline signaling "this icon is still loading" - used in NPC
+     * drop rows while a specific item's icon is being resolved, before rows had per-icon
+     * loading states this meant either a real icon or nothing at all. Deliberately static
+     * rather than a true animated spinner (which would need a custom Icon plus a shared
+     * Timer tracking every currently-visible label to repaint) - a reasonable amount of
+     * complexity for what's ultimately a small polish detail.
+     */
+    private Icon createSmallSpinnerIcon()
+    {
+        final int size = 16;
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(new Color(255, 255, 255, 60));
+                g2.setStroke(new BasicStroke(2f));
+                g2.drawOval(x + 2, y + 2, size - 4, size - 4);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return size;
+            }
+        };
+    }
+
+    /**
      * Picks the right icon for a boolean-style value: the real checkbox-checked sprite for
      * Yes, checkbox-crossed sprite for No (falling back to hand-drawn versions of the same
      * shapes if those sprites haven't loaded), or a hand-drawn list icon for anything else.
@@ -1063,8 +1118,12 @@ public class ItemInfoPanel extends PluginPanel
      */
     private void addTableRow(int row, String label, String value, Icon icon, Color accentColor)
     {
-        Font labelFont = FontManager.getRunescapeFont();
-        Font valueFont = FontManager.getRunescapeFont();
+        // 13pt (from an earlier compacting pass) turned out too small to read comfortably.
+        // Moving the item name beside the icon instead of below it freed up enough
+        // vertical space that this can go back up to something more readable without
+        // growing the panel taller overall.
+        Font labelFont = FontManager.getRunescapeFont().deriveFont(15f);
+        Font valueFont = FontManager.getRunescapeFont().deriveFont(15f);
 
         JLabel labelComp = new JLabel(label);
         labelComp.setFont(labelFont);
@@ -1086,7 +1145,7 @@ public class ItemInfoPanel extends PluginPanel
         gcLabel.gridx = 0;
         gcLabel.gridy = row;
         gcLabel.anchor = GridBagConstraints.NORTHWEST;
-        gcLabel.insets = new Insets(2, 0, 2, 8);
+        gcLabel.insets = new Insets(1, 0, 1, 8);
 
         GridBagConstraints gcValue = new GridBagConstraints();
         gcValue.gridx = 1;
@@ -1094,7 +1153,7 @@ public class ItemInfoPanel extends PluginPanel
         gcValue.anchor = GridBagConstraints.NORTHWEST;
         gcValue.weightx = 1.0;
         gcValue.fill = GridBagConstraints.HORIZONTAL;
-        gcValue.insets = new Insets(2, 0, 2, 0);
+        gcValue.insets = new Insets(1, 0, 1, 0);
 
         infoTable.add(labelComp, gcLabel);
         infoTable.add(valueComp, gcValue);
@@ -1108,7 +1167,7 @@ public class ItemInfoPanel extends PluginPanel
     public void showItem(String name, BufferedImage image, int price, int highAlch, int lowAlch)
     {
         ensureItemViewShown();
-        nameLabel.setText("<html>" + wrapTextManually(name, 140, FontManager.getRunescapeBoldFont().deriveFont(25f)) + "</html>");
+        nameLabel.setText("<html>" + wrapTextManually(name, 110, FontManager.getRunescapeBoldFont().deriveFont(20f)) + "</html>");
         if (image != null)
         {
             setImage(image);
@@ -1328,7 +1387,7 @@ public class ItemInfoPanel extends PluginPanel
         {
             sourcesRequested = true;
             dropsContent.removeAll();
-            dropsContent.add(makeSourcesInfoLabel("Loading..."));
+            dropsContent.add(makeLoadingSpinner());
             shopsContent.removeAll();
             shopsContent.add(makeSourcesInfoLabel("Loading..."));
             loader.run();
@@ -1733,6 +1792,7 @@ public class ItemInfoPanel extends PluginPanel
         label.setText(title);
         label.setIcon(createChevronIcon(expanded, color));
         label.setForeground(color);
+        label.setToolTipText(expanded ? "Click to collapse" : "Click to expand");
     }
 
     private static final int DIR_RIGHT = 0;
@@ -1861,7 +1921,7 @@ public class ItemInfoPanel extends PluginPanel
         {
             sourcesRequested = true;
             dropsContent.removeAll();
-            dropsContent.add(makeSourcesInfoLabel("Loading..."));
+            dropsContent.add(makeLoadingSpinner());
             shopsContent.removeAll();
             shopsContent.add(makeSourcesInfoLabel("Loading..."));
 
@@ -1902,6 +1962,36 @@ public class ItemInfoPanel extends PluginPanel
         return label;
     }
 
+    /**
+     * A real loading indicator instead of static "Loading..." text - most noticeable on
+     * NPC drop tables, where every unique item needs its own icon resolved before the
+     * whole list renders at once, so this can sit on screen for a real, visible stretch
+     * of time. Uses Swing's built-in indeterminate JProgressBar (animates on its own,
+     * no custom timer/animation code needed) rather than hand-building a spinner.
+     */
+    private JComponent makeLoadingSpinner()
+    {
+        JPanel wrapper = new JPanel();
+        wrapper.setLayout(new BoxLayout(wrapper, BoxLayout.Y_AXIS));
+        wrapper.setOpaque(false);
+        wrapper.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JProgressBar spinner = new JProgressBar();
+        spinner.setIndeterminate(true);
+        spinner.setAlignmentX(Component.LEFT_ALIGNMENT);
+        spinner.setMaximumSize(new Dimension(Integer.MAX_VALUE, 6));
+        spinner.setForeground(GOLD);
+        spinner.setBackground(new Color(255, 255, 255, 20));
+        spinner.setBorderPainted(false);
+
+        JLabel label = makeSourcesInfoLabel("Loading...");
+
+        wrapper.add(spinner);
+        wrapper.add(Box.createVerticalStrut(6));
+        wrapper.add(label);
+        return wrapper;
+    }
+
     private static final Color ALWAYS_COLOR = new Color(135, 206, 235);
     // Four-tier rarity gradient (green -> yellow -> red -> purple), replacing the previous
     // all-green-shades scheme - the higher tiers now read as visibly more significant
@@ -1921,8 +2011,71 @@ public class ItemInfoPanel extends PluginPanel
      */
     public void setSources(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops)
     {
+        setSourcesInternal(drops, shops, null, false);
+    }
+
+    /**
+     * @param dropIcons item name -> icon, used only for NPC drop rows (where every row is
+     *                  an item, so a matching icon makes sense). Item Sources' own drop
+     *                  rows (monsters) keep using the no-icon overload above, since a
+     *                  monster icon would need a much heavier per-row wiki image fetch
+     *                  instead of the item-id-based lookup already built for navigation.
+     */
+    public void setSources(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops, Map<String, BufferedImage> dropIcons)
+    {
+        setSourcesInternal(drops, shops, dropIcons, false);
+    }
+
+    /**
+     * Renders the drop rows immediately, with every icon slot showing a small loading
+     * spinner instead of waiting for the whole batch to resolve first - the plugin then
+     * calls updateDropIcon() individually as each one finishes, rather than one big wait
+     * before anything appears at all.
+     */
+    public void setSourcesWithLoadingIcons(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops)
+    {
+        setSourcesInternal(drops, shops, null, true);
+    }
+
+    /**
+     * Same as above, but with some icons already known upfront (e.g. from a previous
+     * examine's cache) - those show immediately instead of a spinner, while anything not
+     * yet in knownIcons still gets one.
+     */
+    public void setSourcesWithLoadingIcons(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops, Map<String, BufferedImage> knownIcons)
+    {
+        setSourcesInternal(drops, shops, knownIcons, true);
+    }
+
+    /**
+     * Updates a single item's icon in place, once it resolves - finds every row currently
+     * showing that item name (a drop table can list the same item multiple times, e.g.
+     * "Coins" at several different quantities/rarities) and swaps its loading spinner for
+     * the real icon, without touching or rebuilding any other row.
+     */
+    public void updateDropIcon(String itemName, BufferedImage icon)
+    {
+        List<JLabel> labels = dropIconLabels.get(itemName);
+        if (labels == null || labels.isEmpty() || icon == null)
+        {
+            return;
+        }
+        final int iconBoxSize = 32;
+        Image scaled = icon.getScaledInstance(iconBoxSize, iconBoxSize, Image.SCALE_SMOOTH);
+        ImageIcon imageIcon = new ImageIcon(scaled);
+        for (JLabel label : labels)
+        {
+            label.setIcon(imageIcon);
+        }
+        revalidate();
+        repaint();
+    }
+
+    private void setSourcesInternal(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops, Map<String, BufferedImage> dropIcons, boolean iconsLoading)
+    {
         cachedDrops = drops != null ? drops : new ArrayList<>();
         cachedShops = shops != null ? shops : new ArrayList<>();
+        dropIconLabels.clear();
 
         dropsContent.removeAll();
         if (cachedDrops.isEmpty())
@@ -1939,7 +2092,8 @@ public class ItemInfoPanel extends PluginPanel
         {
             for (ItemInfoClient.DropSource drop : cachedDrops)
             {
-                dropsContent.add(buildDropRow(drop));
+                BufferedImage icon = (dropIcons != null && drop.source != null) ? dropIcons.get(drop.source) : null;
+                dropsContent.add(buildDropRow(drop, icon, iconsLoading));
             }
         }
 
@@ -1985,10 +2139,16 @@ public class ItemInfoPanel extends PluginPanel
      * like "100-150 (noted)" collided with the drop rate text), so every line here is
      * independently wrap-safe instead.
      */
-    private JPanel buildDropRow(ItemInfoClient.DropSource drop)
+    private JPanel buildDropRow(ItemInfoClient.DropSource drop, BufferedImage icon, boolean iconLoading)
     {
         JPanel row = new JPanel();
-        row.setLayout(new BoxLayout(row, BoxLayout.Y_AXIS));
+        // Icon+horizontal layout only applies to NPC drop rows (items), where an icon is
+        // actually possible - monster rows (an item's own drop sources) never get one (see
+        // loadNpcDropIconsAndDisplay's docs for why: no ID-based shortcut exists for
+        // monster icons, only items), so they revert to the original plain vertical stack
+        // rather than wasting a permanently-blank icon column.
+        boolean showIcon = npcDropsMode;
+        row.setLayout(new BoxLayout(row, showIcon ? BoxLayout.X_AXIS : BoxLayout.Y_AXIS));
         row.setOpaque(false);
         row.setAlignmentX(Component.LEFT_ALIGNMENT);
         row.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
@@ -1997,13 +2157,59 @@ public class ItemInfoPanel extends PluginPanel
                 BorderFactory.createEmptyBorder(6, 0, 6, 0)
         ));
 
+        if (showIcon)
+        {
+            // Fixed-size icon slot on the left, Loot Lookup style - kept blank (not hidden)
+            // when this specific item's icon failed to resolve, so it still lines up with
+            // sibling rows that did get one.
+            JLabel iconLabel = new JLabel();
+            final int iconBoxSize = 32;
+            iconLabel.setPreferredSize(new Dimension(iconBoxSize, iconBoxSize));
+            iconLabel.setMinimumSize(new Dimension(iconBoxSize, iconBoxSize));
+            iconLabel.setMaximumSize(new Dimension(iconBoxSize, iconBoxSize));
+            iconLabel.setHorizontalAlignment(SwingConstants.CENTER);
+            iconLabel.setAlignmentY(Component.TOP_ALIGNMENT);
+            if (icon != null)
+            {
+                Image scaled = icon.getScaledInstance(iconBoxSize, iconBoxSize, Image.SCALE_SMOOTH);
+                iconLabel.setIcon(new ImageIcon(scaled));
+            }
+            else if (iconLoading)
+            {
+                // Small per-icon busy indicator instead of leaving the slot blank while
+                // this specific item's icon is still resolving - rows render immediately
+                // rather than the whole table waiting on the slowest icon, and this fills
+                // the gap in the meantime. Swapped for the real icon (or left blank on
+                // failure) via updateDropIcon() once the fetch actually completes.
+                iconLabel.setIcon(createSmallSpinnerIcon());
+            }
+            if (drop.source != null)
+            {
+                dropIconLabels.computeIfAbsent(drop.source, k -> new ArrayList<>()).add(iconLabel);
+            }
+            row.add(iconLabel);
+            row.add(Box.createHorizontalStrut(8));
+        }
+
+        JPanel textStack = new JPanel();
+        textStack.setLayout(new BoxLayout(textStack, BoxLayout.Y_AXIS));
+        textStack.setOpaque(false);
+        textStack.setAlignmentX(Component.LEFT_ALIGNMENT);
+        textStack.setAlignmentY(Component.TOP_ALIGNMENT);
+
+        // Wraps narrower when there's an icon column eating into the available width.
+        int wrapWidth = showIcon ? 130 : 160;
         String rawName = drop.source != null ? drop.source : "Unknown";
-        JLabel nameLabel = new JLabel("<html>" + wrapTextManually(rawName, 160, FontManager.getRunescapeFont()) + "</html>");
+        JLabel nameLabel = new JLabel("<html>" + wrapTextManually(rawName, wrapWidth, FontManager.getRunescapeFont()) + "</html>");
         nameLabel.setFont(FontManager.getRunescapeFont());
-        nameLabel.setForeground(Color.WHITE);
         nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         if (dropRowClickListener != null)
         {
+            // A distinct default color (not plain white) signals this name is clickable
+            // before the user even hovers over it - matches the classic "hyperlink blue"
+            // convention, reusing the same light blue already used for "Always" rarity
+            // rather than introducing a new arbitrary color.
+            nameLabel.setForeground(ALWAYS_COLOR);
             nameLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
             nameLabel.addMouseListener(new MouseAdapter()
             {
@@ -2022,11 +2228,15 @@ public class ItemInfoPanel extends PluginPanel
                 @Override
                 public void mouseExited(MouseEvent e)
                 {
-                    nameLabel.setForeground(Color.WHITE);
+                    nameLabel.setForeground(ALWAYS_COLOR);
                 }
             });
         }
-        row.add(nameLabel);
+        else
+        {
+            nameLabel.setForeground(Color.WHITE);
+        }
+        textStack.add(nameLabel);
 
         // Some sub-locations are themselves just a level indicator (e.g. "Black Guard#Level
         // 25" formats to "Black Guard (Level 25)"), which would otherwise show the same
@@ -2050,21 +2260,36 @@ public class ItemInfoPanel extends PluginPanel
                 levelLabel.setIconTextGap(6);
             }
 
-            row.add(Box.createVerticalStrut(2));
-            row.add(levelLabel);
+            textStack.add(Box.createVerticalStrut(2));
+            textStack.add(levelLabel);
         }
 
         JLabel qtyLabel = new JLabel("Quantity: " + formatQuantity(drop.quantity));
         qtyLabel.setFont(FontManager.getRunescapeFont());
         qtyLabel.setForeground(Color.WHITE);
         qtyLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        row.add(Box.createVerticalStrut(4));
-        row.add(qtyLabel);
+        textStack.add(Box.createVerticalStrut(4));
+        textStack.add(qtyLabel);
 
-        JLabel rarityLabel = buildRarityLabel(drop.rarity);
+        JLabel rarityLabel = buildRarityLabel(drop.rarity, wrapWidth);
         rarityLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        row.add(Box.createVerticalStrut(2));
-        row.add(rarityLabel);
+        textStack.add(Box.createVerticalStrut(2));
+        textStack.add(rarityLabel);
+
+        if (showIcon)
+        {
+            row.add(textStack);
+        }
+        else
+        {
+            // No icon column, so the text stack's own components are added directly to
+            // the row rather than nesting an extra panel - matches the original structure
+            // exactly rather than just visually resembling it.
+            for (Component c : textStack.getComponents())
+            {
+                row.add(c);
+            }
+        }
 
         return row;
     }
@@ -2213,6 +2438,45 @@ public class ItemInfoPanel extends PluginPanel
 
         for (String word : text.split(" "))
         {
+            // A single space-delimited "word" can itself be wider than the whole
+            // available line (e.g. a drop rate like "1/6,729.23" has no spaces inside it
+            // to wrap at) - confirmed via a real screenshot where these were overflowing
+            // straight past the panel edge instead of wrapping. Break it character-by-
+            // character in that case, rather than relying on space-splitting alone.
+            if (metrics.stringWidth(word) > maxWidthPx)
+            {
+                if (currentLine.length() > 0)
+                {
+                    if (result.length() > 0)
+                    {
+                        result.append("<br>");
+                    }
+                    result.append(escapeHtml(currentLine.toString()));
+                    currentLine = new StringBuilder();
+                }
+
+                StringBuilder chunk = new StringBuilder();
+                for (char ch : word.toCharArray())
+                {
+                    String candidateChunk = chunk.toString() + ch;
+                    if (metrics.stringWidth(candidateChunk) > maxWidthPx && chunk.length() > 0)
+                    {
+                        if (result.length() > 0)
+                        {
+                            result.append("<br>");
+                        }
+                        result.append(escapeHtml(chunk.toString()));
+                        chunk = new StringBuilder(String.valueOf(ch));
+                    }
+                    else
+                    {
+                        chunk.append(ch);
+                    }
+                }
+                currentLine = chunk;
+                continue;
+            }
+
             String candidate = currentLine.length() == 0 ? word : currentLine + " " + word;
             if (metrics.stringWidth(candidate) > maxWidthPx && currentLine.length() > 0)
             {
@@ -2316,16 +2580,21 @@ public class ItemInfoPanel extends PluginPanel
      * against the RuneScape font at this size), just the color coding to distinguish
      * "Always" from numeric rates.
      */
-    private JLabel buildRarityLabel(String rarity)
+    private JLabel buildRarityLabel(String rarity, int wrapWidth)
     {
         String display = (rarity != null && !rarity.isEmpty()) ? rarity : "-";
         display = addThousandsCommas(display);
 
-        JLabel label = new JLabel("Drop rate: " + display);
         // Bold variant at a slightly larger size, rather than the regular weight - the
         // extra stroke weight makes dense fraction numbers like "1/8,192" easier to read
         // while staying in the RuneScape font family.
-        label.setFont(FontManager.getRunescapeBoldFont().deriveFont(15f));
+        Font rarityFont = FontManager.getRunescapeBoldFont().deriveFont(15f);
+        // No "Drop rate:" label anymore - the value alone is enough in context (this is
+        // already inside a "Drops" section), and dropping the label frees up a full line
+        // per row plus more width for the value itself, avoiding awkward wraps.
+        String wrappedValue = wrapTextManually(display, wrapWidth, rarityFont);
+        JLabel label = new JLabel("<html>" + wrappedValue + "</html>");
+        label.setFont(rarityFont);
         label.setForeground(rarityColor(display));
         return label;
     }
@@ -2468,7 +2737,7 @@ public class ItemInfoPanel extends PluginPanel
     public void showNonItem(String name)
     {
         ensureItemViewShown();
-        nameLabel.setText("<html>" + wrapTextManually(name, 140, FontManager.getRunescapeBoldFont().deriveFont(25f)) + "</html>");
+        nameLabel.setText("<html>" + wrapTextManually(name, 110, FontManager.getRunescapeBoldFont().deriveFont(20f)) + "</html>");
         showLoadingImage();
         infoTable.removeAll();
         updatePropertiesVisibility();
