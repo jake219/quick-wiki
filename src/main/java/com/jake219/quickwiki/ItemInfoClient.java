@@ -229,6 +229,10 @@ public class ItemInfoClient
     {
         public List<DropSource> drops = new ArrayList<>();
         public List<ShopSource> shops = new ArrayList<>();
+        /** True when drops represents this item's own contents (a reward container -
+         * casket, chest, coffin, crate, whatever it's called) rather than normal "what
+         * drops/sells this item" sources. */
+        public boolean isRewards = false;
     }
 
     /**
@@ -297,9 +301,10 @@ public class ItemInfoClient
             }
         };
 
-        fetchDropSources(itemName, drops ->
+        fetchDropSources(itemName, result ->
         {
-            data.drops = drops;
+            data.drops = result.drops;
+            data.isRewards = result.isRewards;
             finishOne.run();
         });
 
@@ -444,21 +449,53 @@ public class ItemInfoClient
         return base + " (" + section.toLowerCase() + ")";
     }
 
-    private void fetchDropSources(String itemName, Consumer<List<DropSource>> callback)
+    /**
+     * Small holder so the reward-vs-normal distinction can travel back through the same
+     * callback chain as the drops list itself, rather than needing a second round-trip.
+     */
+    private static class DropSourcesResult
     {
-        // Reward caskets get their contents shown unconditionally, before even trying
-        // the normal "what drops this item" query below - the wiki's dropsline data can
-        // legitimately list monsters as "sources" for a reward casket (monsters that drop
-        // the equivalent clue scroll, e.g. Mutated Bloodveld and Basilisk Knight both
-        // list "Reward casket (elite)" as a dropped item), which was taking priority over
-        // ever showing the casket's actual contents at all. The monster-sources data is
-        // real, just answering a different question than what this feature is for.
-        if (isRewardCasketName(itemName))
-        {
-            fetchRewardCasketContents(itemName, callback);
-            return;
-        }
+        List<DropSource> drops;
+        boolean isRewards;
+    }
 
+    private void fetchDropSources(String itemName, Consumer<DropSourcesResult> callback)
+    {
+        // Always try "what's inside this container" first, for any item - rather than
+        // checking whether the name looks like a known reward-container pattern. There's
+        // no consistent naming across these: "Reward casket (hard)", "Rewards Chest
+        // (Fortis Colosseum)", "Chest (Barrows)", "Lunar chest", "Supply crate", "Coffin
+        // (Hallowed Sepulchre)" all use completely different words, so pattern-matching
+        // would always be chasing an incomplete list. A normal, non-container item (e.g.
+        // "Rune platebody") simply has no page_name rows in dropsline at all - nothing
+        // "drops from" a platebody - so this query is safe to try unconditionally and
+        // will just come back empty for the vast majority of items.
+        String rewardsQuery = "bucket('dropsline').select('item_name','drop_json')"
+                + ".where('page_name','" + escapeForBucketQuery(itemName) + "').limit(500).run()";
+
+        runBucketQuery(rewardsQuery, rewardsRoot ->
+        {
+            List<DropSource> rewards = parseNpcDropRows(rewardsRoot, itemName);
+            if (!rewards.isEmpty())
+            {
+                DropSourcesResult result = new DropSourcesResult();
+                result.drops = rewards;
+                result.isRewards = true;
+                callback.accept(result);
+                return;
+            }
+
+            fetchNormalDropSources(itemName, callback);
+        });
+    }
+
+    /**
+     * The original "what drops/where does this item come from" lookup - only reached
+     * once the reverse-direction "what's inside this" query above came back empty, i.e.
+     * this item isn't itself a reward container.
+     */
+    private void fetchNormalDropSources(String itemName, Consumer<DropSourcesResult> callback)
+    {
         // 'item_name' is the correct where() field (not 'item_page'). Rarity/quantity/
         // level all live inside the drop_json blob rather than as flattened fields.
         String query = "bucket('dropsline').select('page_name','drop_json')"
@@ -469,7 +506,10 @@ public class ItemInfoClient
             List<DropSource> drops = parseDropRows(root, itemName);
             if (!drops.isEmpty())
             {
-                callback.accept(drops);
+                DropSourcesResult result = new DropSourcesResult();
+                result.drops = drops;
+                result.isRewards = false;
+                callback.accept(result);
                 return;
             }
 
@@ -488,32 +528,6 @@ public class ItemInfoClient
             String baseName = itemName.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
             fetchDropSourcesInertFallback(baseName, callback);
         });
-    }
-
-    /**
-     * Matches "Reward casket (tier)" names (e.g. "Reward casket (hard)") - used to detect
-     * when the normal item-drops query's empty result means "look up the casket's own
-     * contents instead" rather than "this item genuinely has no sources".
-     */
-    public boolean isRewardCasketName(String itemName)
-    {
-        return java.util.regex.Pattern.compile("(?i)^Reward casket \\([^)]+\\)$").matcher(itemName.trim()).matches();
-    }
-
-    /**
-     * Surfaces a reward casket's actual contents (what it can give you) rather than what
-     * "drops" it - nothing does, reward caskets are earned by completing clue scrolls, not
-     * dropped by monsters, same as scroll boxes. Reuses the same page_name-filtered
-     * dropsline query already used for an NPC's own drop table - each reward item has its
-     * own dropsline row with page_name set to the casket's name, the same way a monster's
-     * drops are tracked, so this already surfaces them with no new query logic needed.
-     */
-    private void fetchRewardCasketContents(String casketName, Consumer<List<DropSource>> callback)
-    {
-        String query = "bucket('dropsline').select('item_name','drop_json')"
-                + ".where('page_name','" + escapeForBucketQuery(casketName) + "').limit(500).run()";
-
-        runBucketQuery(query, root -> callback.accept(parseNpcDropRows(root, casketName)));
     }
 
     /**
@@ -538,14 +552,17 @@ public class ItemInfoClient
      * Fetches the equivalent clue scroll's own drop sources on a scroll box's behalf - see
      * scrollBoxToClueScrollName for why this substitution makes sense.
      */
-    private void fetchDropSourcesForClueScrollEquivalent(String clueScrollName, Consumer<List<DropSource>> callback)
+    private void fetchDropSourcesForClueScrollEquivalent(String clueScrollName, Consumer<DropSourcesResult> callback)
     {
         String query = "bucket('dropsline').select('page_name','drop_json')"
                 + ".where('item_name','" + escapeForBucketQuery(clueScrollName) + "').limit(500).run()";
 
         runBucketQuery(query, root ->
         {
-            callback.accept(parseDropRows(root, clueScrollName));
+            DropSourcesResult result = new DropSourcesResult();
+            result.drops = parseDropRows(root, clueScrollName);
+            result.isRewards = false;
+            callback.accept(result);
         });
     }
 
@@ -558,7 +575,7 @@ public class ItemInfoClient
      * for page_name_sub values (e.g. "Dragon defender#Normal"). Only tried when the
      * plain-name query comes back empty, so this can't override a real result.
      */
-    private void fetchDropSourcesInertFallback(String itemName, Consumer<List<DropSource>> callback)
+    private void fetchDropSourcesInertFallback(String itemName, Consumer<DropSourcesResult> callback)
     {
         String inertName = itemName + "#Inert";
         String query = "bucket('dropsline').select('page_name','drop_json')"
@@ -566,7 +583,10 @@ public class ItemInfoClient
 
         runBucketQuery(query, root ->
         {
-            callback.accept(parseDropRows(root, inertName));
+            DropSourcesResult result = new DropSourcesResult();
+            result.drops = parseDropRows(root, inertName);
+            result.isRewards = false;
+            callback.accept(result);
         });
     }
 

@@ -283,6 +283,39 @@ public class ItemInfoPlugin extends Plugin
                             // "-" for a universal drop with no level restriction) -
                             // fall back to -1 (unknown).
                         }
+
+                        // Some reward-container sources carry an extra trailing
+                        // qualifier the real page name doesn't have - e.g. dropsline
+                        // tracks per-wave rewards as "Rewards Chest (Fortis Colosseum)
+                        // (Wave 2)", but the actual item/object page is just "Rewards
+                        // Chest (Fortis Colosseum)" with no wave number. Stripped here
+                        // (only the trailing parenthetical, not the whole name the way
+                        // stripSubLocationForNav does) and retried once as both an item
+                        // and an object before giving up and falling back to NPC.
+                        String trailingStripped = stripTrailingParenthetical(clickedName);
+                        if (trailingStripped != null)
+                        {
+                            final int finalCombatLevel = combatLevel;
+                            itemInfoClient.resolveExactItemIdStrict(trailingStripped, retryItemId ->
+                            {
+                                if (retryItemId != null)
+                                {
+                                    showItemByName(trailingStripped, retryItemId, true);
+                                    return;
+                                }
+                                itemInfoClient.resolveExactObjectIdStrict(trailingStripped, retryObjectId ->
+                                {
+                                    if (retryObjectId != null)
+                                    {
+                                        showObjectByName(trailingStripped, retryObjectId, true);
+                                        return;
+                                    }
+                                    showNpcByName(stripSubLocationForNav(clickedName), -1, true, finalCombatLevel);
+                                });
+                            });
+                            return;
+                        }
+
                         // Only strip a sub-location suffix (e.g. "Cyclops (Warriors'
                         // Guild Basement)" -> "Cyclops") now that the raw, unstripped
                         // name has already been tried as a real item and object and
@@ -1100,9 +1133,6 @@ public class ItemInfoPlugin extends Plugin
                         {
                             return;
                         }
-                        boolean isRewardCasket = itemInfoClient.isRewardCasketName(pageName);
-                        panel.setShopsSectionVisible(!isRewardCasket);
-                        panel.setNpcDropsMode(isRewardCasket, isRewardCasket ? "Rewards" : "Drops");
                         panel.setSourcesLoader(() ->
                                 itemInfoClient.fetchItemSources(pageName, finalItemId, sources ->
                                         clientThread.invoke(() ->
@@ -1111,7 +1141,16 @@ public class ItemInfoPlugin extends Plugin
                                             {
                                                 drop.skillIcon = skillIconForDropType(drop.dropType);
                                             }
-                                            if (isRewardCasket)
+                                            SwingUtilities.invokeLater(() ->
+                                            {
+                                                if (navigationGeneration.get() != myGen)
+                                                {
+                                                    return;
+                                                }
+                                                panel.setShopsSectionVisible(!sources.isRewards);
+                                                panel.setNpcDropsMode(sources.isRewards, sources.isRewards ? "Rewards" : "Drops");
+                                            });
+                                            if (sources.isRewards)
                                             {
                                                 loadNpcDropIconsAndDisplay(sources.drops, myGen);
                                             }
@@ -1246,6 +1285,26 @@ public class ItemInfoPlugin extends Plugin
     {
         int idx = name.indexOf(" (");
         return idx > 0 ? name.substring(0, idx) : name;
+    }
+
+    /**
+     * Strips only the trailing "(qualifier)" from a name that has two - e.g. "Rewards
+     * Chest (Fortis Colosseum) (Wave 2)" -> "Rewards Chest (Fortis Colosseum)". Some
+     * reward-container sources carry a per-wave/per-stage suffix in dropsline that the
+     * actual item/object page doesn't have. Unlike stripSubLocationForNav (which strips
+     * from the first parenthesis, wiping out qualifiers that are actually part of the
+     * real name), this only removes the last one, leaving an earlier qualifier like
+     * "(Fortis Colosseum)" intact. Returns null if there's no second parenthetical to
+     * strip, so callers can tell "nothing to retry" apart from "stripped to nothing".
+     */
+    private String stripTrailingParenthetical(String name)
+    {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(.*\\([^)]*\\))\\s*\\([^)]*\\)$").matcher(name.trim());
+        if (!matcher.matches())
+        {
+            return null;
+        }
+        return matcher.group(1).trim();
     }
 
     /**
@@ -1535,9 +1594,6 @@ public class ItemInfoPlugin extends Plugin
                         {
                             return;
                         }
-                        boolean isRewardCasket = itemInfoClient.isRewardCasketName(pageName);
-                        panel.setShopsSectionVisible(!isRewardCasket);
-                        panel.setNpcDropsMode(isRewardCasket, isRewardCasket ? "Rewards" : "Drops");
                         panel.setSourcesLoader(() ->
                                 itemInfoClient.fetchItemSources(pageName, itemId, sources ->
                                         clientThread.invoke(() ->
@@ -1546,7 +1602,16 @@ public class ItemInfoPlugin extends Plugin
                                             {
                                                 drop.skillIcon = skillIconForDropType(drop.dropType);
                                             }
-                                            if (isRewardCasket)
+                                            SwingUtilities.invokeLater(() ->
+                                            {
+                                                if (navigationGeneration.get() != myGen)
+                                                {
+                                                    return;
+                                                }
+                                                panel.setShopsSectionVisible(!sources.isRewards);
+                                                panel.setNpcDropsMode(sources.isRewards, sources.isRewards ? "Rewards" : "Drops");
+                                            });
+                                            if (sources.isRewards)
                                             {
                                                 loadNpcDropIconsAndDisplay(sources.drops, myGen);
                                             }
