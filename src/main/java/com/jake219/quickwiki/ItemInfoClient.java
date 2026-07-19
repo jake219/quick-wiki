@@ -147,6 +147,70 @@ public class ItemInfoClient
     }
 
     /**
+     * Attack/Defence/Other combat bonuses for a wieldable weapon or piece of equipment.
+     * Lives in the wiki's 'infobox_bonuses' bucket (not infobox_item), keyed by
+     * 'page_name_sub' rather than 'item_name' or 'page_name'.
+     */
+    public static class CombatBonuses
+    {
+        public int stabAttack;
+        public int slashAttack;
+        public int crushAttack;
+        public int magicAttack;
+        public int rangeAttack;
+        public int stabDefence;
+        public int slashDefence;
+        public int crushDefence;
+        public int magicDefence;
+        public int rangeDefence;
+        public int strength;
+        public int rangedStrength;
+        public int magicDamage;
+        public int prayer;
+        public String attackSpeed;
+        public String attackRange;
+    }
+
+    /**
+     * Combat levels and bonuses for an NPC. Lives in the 'infobox_monster' bucket,
+     * filtered by 'page_name' (page_name_sub, used on the item side, returns nothing
+     * here). Unlike items, NPCs have levels as well as bonuses, and only one combined
+     * attack bonus rather than separate stab/slash/crush - monsters don't get a choice
+     * of attack style the way weapons do.
+     */
+    public static class NpcCombatStats
+    {
+        public int hitpoints;
+        public int attackLevel;
+        public int strengthLevel;
+        public int defenceLevel;
+        public int magicLevel;
+        public int rangedLevel;
+        public int attackBonus;
+        public int strengthBonus;
+        public int magicAttackBonus;
+        public int magicDamageBonus;
+        public int rangeAttackBonus;
+        public int rangedStrengthBonus;
+        public int stabDefenceBonus;
+        public int slashDefenceBonus;
+        public int crushDefenceBonus;
+        public int magicDefenceBonus;
+        public int rangeDefenceBonus;
+        /** Separate defence values against light (darts), standard (arrows), and heavy
+         * (bolts) ranged ammo - the wiki tracks these as three distinct fields rather
+         * than one combined value (rangeDefenceBonus above is the older, legacy field
+         * being phased out in favor of this split). */
+        public int lightRangeDefenceBonus;
+        public int standardRangeDefenceBonus;
+        public int heavyRangeDefenceBonus;
+        /** Null/empty means no elemental weakness (matches the wiki's "Pure essence" icon
+         * case) - otherwise one of Air/Water/Earth/Fire. */
+        public String elementalWeaknessType;
+        public int elementalWeaknessPercent;
+    }
+
+    /**
      * A single row describing a shop that stocks the item.
      */
     public static class ShopSource
@@ -168,24 +232,60 @@ public class ItemInfoClient
     }
 
     /**
-     * Looks up where an item can be obtained: monster drops (Bucket:Dropsline) and shop
-     * stock (Bucket:Storeline). Both bucket queries run concurrently and the combined
-     * result is handed to the callback once both have finished (each individually falls
-     * back to an empty list on any failure, so one bad query never blocks the other).
+     * Looks up where an item can be obtained: monster drops (dropsline bucket) and shop
+     * stock (storeline bucket). Both queries run concurrently, combined result goes to
+     * the callback once both finish (each falls back to an empty list on failure).
      * <p>
-     * NOTE ON FIELD NAMES: the wiki's Bucket API doesn't have official per-table schema
-     * docs at the time of writing, so the field names below ("item_page" for the dropped
-     * item's page on the dropsline bucket, "sold_item"/"sold_by"/"store_sell_price" on the
-     * storeline bucket) are inferred from the wiki's own Lua modules and third-party query
-     * examples rather than a live-tested response. If this comes back empty for items you
-     * know have sources, open the generated query URL (logged at debug level below) in a
-     * browser to see the raw field names actually returned and adjust the select()/where()
-     * calls accordingly.
+     * Some items have multiple variants sharing one generic page name (e.g. Pendant of
+     * ates has Inert and Charged forms), and the drop table is filed under the specific
+     * variant's name, not the generic one. So if we know the item's actual ID, resolve
+     * the variant-specific name via infobox_item first and query with that instead.
      *
-     * @param pageName the exact wiki page name of the item (as resolved via resolveExactPageName)
+     * @param pageName the exact wiki page name of the item
+     * @param itemId the item's actual resolved in-game ID if known, or -1 if unknown
      * @param callback receives the combined drop/shop source lists (empty lists if nothing found)
      */
-    public void fetchItemSources(String pageName, Consumer<ItemSourcesData> callback)
+    public void fetchItemSources(String pageName, int itemId, Consumer<ItemSourcesData> callback)
+    {
+        if (itemId >= 0)
+        {
+            String resolveQuery = "bucket('infobox_item').select('item_name')"
+                    + ".where('item_id'," + itemId + ").limit(1).run()";
+
+            runBucketQuery(resolveQuery, resolveRoot ->
+            {
+                String resolvedName = null;
+                try
+                {
+                    if (resolveRoot != null && resolveRoot.has("bucket"))
+                    {
+                        JsonArray bucket = resolveRoot.getAsJsonArray("bucket");
+                        if (bucket.size() > 0)
+                        {
+                            String name = firstString(bucket.get(0).getAsJsonObject(), "item_name");
+                            if (name != null && !name.isEmpty())
+                            {
+                                resolvedName = name;
+                            }
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    log.warn("Failed to resolve variant-specific item_name for {} (id={})", pageName, itemId, e);
+                }
+
+                String nameToUse = resolvedName != null ? resolvedName : pageName;
+                fetchItemSourcesByName(nameToUse, callback);
+            });
+        }
+        else
+        {
+            fetchItemSourcesByName(pageName, callback);
+        }
+    }
+
+    private void fetchItemSourcesByName(String itemName, Consumer<ItemSourcesData> callback)
     {
         ItemSourcesData data = new ItemSourcesData();
         AtomicInteger remaining = new AtomicInteger(2);
@@ -197,13 +297,13 @@ public class ItemInfoClient
             }
         };
 
-        fetchDropSources(pageName, drops ->
+        fetchDropSources(itemName, drops ->
         {
             data.drops = drops;
             finishOne.run();
         });
 
-        fetchShopSources(pageName, shops ->
+        fetchShopSources(itemName, shops ->
         {
             data.shops = shops;
             finishOne.run();
@@ -213,29 +313,27 @@ public class ItemInfoClient
     /**
      * Fetches a monster/NPC's own drop table - the reverse of fetchItemSources: instead of
      * "which monsters drop this item", this is "which items does this monster drop".
-     * Confirmed working via a live query: filtering dropsline by page_name (the monster)
-     * instead of item_name (the item) returns that monster's real drop table.
+     * Filters dropsline by page_name (the monster) instead of item_name (the item).
      * <p>
      * Reuses the same DropSource class as item lookups, just populated the other way
      * around - source holds the dropped item's name instead of a monster's name, and
-     * level/dropType/skillIcon are left null (not applicable here; buildDropRow already
-     * handles those being absent gracefully). This keeps the display identical to the
-     * item-side drop rows, as requested.
+     * level/dropType/skillIcon are left null (not applicable here).
      *
      * @param npcName the exact wiki page name of the monster/NPC
      * @param callback receives the drop list, sorted most-common-first (empty if none found)
      */
     public void fetchNpcDrops(String npcName, Consumer<List<DropSource>> callback)
     {
-        // limit(500), not 50 - confirmed via a real user report that Zulrah's drop table
-        // (unique drops + tertiary + common loot across overlapping phase tables) exceeds
-        // 50 total entries, silently truncating items like Antidote++(4) that happened to
-        // fall past whatever the bucket's internal ordering put in the first 50. The same
-        // risk applies to any monster with a large enough table, not just Zulrah.
+        // limit(500), not 50 - Zulrah's drop table (unique drops + tertiary + common loot
+        // across overlapping phase tables) exceeds 50 entries, silently truncating items
+        // that fall past whatever the bucket's ordering puts in the first 50.
         String query = "bucket('dropsline').select('item_name','drop_json')"
                 + ".where('page_name','" + escapeForBucketQuery(npcName) + "').limit(500).run()";
 
-        runBucketQuery(query, root -> callback.accept(parseNpcDropRows(root, npcName)));
+        runBucketQuery(query, root ->
+        {
+            callback.accept(parseNpcDropRows(root, npcName));
+        });
     }
 
     private List<DropSource> parseNpcDropRows(JsonObject root, String npcName)
@@ -250,7 +348,12 @@ public class ItemInfoClient
                     JsonObject row = el.getAsJsonObject();
 
                     DropSource ds = new DropSource();
-                    ds.source = firstString(row, "item_name");
+                    String rawItemName = firstString(row, "item_name");
+                    // Convert the wiki's "#Section" page-anchor syntax (e.g. "Pendant of
+                    // ates#Inert") into the real in-game display name format instead of
+                    // just stripping it - stripping would resolve the icon to the wrong
+                    // variant. See convertWikiSectionSuffix for the exact format.
+                    ds.source = convertWikiSectionSuffix(rawItemName);
 
                     if (row.has("drop_json"))
                     {
@@ -321,17 +424,150 @@ public class ItemInfoClient
         return deduped;
     }
 
+    /**
+     * Converts the wiki's "#Section" page-anchor syntax (used throughout this file for
+     * page_name_sub values like "Dragon defender#Normal", "Toxic blowpipe#Charged") into
+     * the "(section)" parenthetical format real in-game item names actually use, so the
+     * result is searchable rather than a wiki-internal string with a literal "#" that
+     * won't match any real item. Returns names with no "#" unchanged.
+     */
+    private String convertWikiSectionSuffix(String rawName)
+    {
+        if (rawName == null || !rawName.contains("#"))
+        {
+            return rawName;
+        }
+
+        int hashIndex = rawName.indexOf('#');
+        String base = rawName.substring(0, hashIndex).trim();
+        String section = rawName.substring(hashIndex + 1).trim();
+        return base + " (" + section.toLowerCase() + ")";
+    }
+
     private void fetchDropSources(String itemName, Consumer<List<DropSource>> callback)
     {
-        // Confirmed working end-to-end against the live API: 'item_name' is the correct
-        // where() field (not 'item_page', which errored), and 'page_name'/'drop_json' are
-        // valid select() fields. Rarity/quantity/level all live inside the drop_json blob
-        // rather than as flattened top-level fields - see parseDropRows below for the
-        // confirmed blob key names.
+        // Reward caskets get their contents shown unconditionally, before even trying
+        // the normal "what drops this item" query below - the wiki's dropsline data can
+        // legitimately list monsters as "sources" for a reward casket (monsters that drop
+        // the equivalent clue scroll, e.g. Mutated Bloodveld and Basilisk Knight both
+        // list "Reward casket (elite)" as a dropped item), which was taking priority over
+        // ever showing the casket's actual contents at all. The monster-sources data is
+        // real, just answering a different question than what this feature is for.
+        if (isRewardCasketName(itemName))
+        {
+            fetchRewardCasketContents(itemName, callback);
+            return;
+        }
+
+        // 'item_name' is the correct where() field (not 'item_page'). Rarity/quantity/
+        // level all live inside the drop_json blob rather than as flattened fields.
         String query = "bucket('dropsline').select('page_name','drop_json')"
                 + ".where('item_name','" + escapeForBucketQuery(itemName) + "').limit(500).run()";
 
-        runBucketQuery(query, root -> callback.accept(parseDropRows(root, itemName)));
+        runBucketQuery(query, root ->
+        {
+            List<DropSource> drops = parseDropRows(root, itemName);
+            if (!drops.isEmpty())
+            {
+                callback.accept(drops);
+                return;
+            }
+
+            String clueScrollEquivalent = scrollBoxToClueScrollName(itemName);
+            if (clueScrollEquivalent != null)
+            {
+                fetchDropSourcesForClueScrollEquivalent(clueScrollEquivalent, callback);
+                return;
+            }
+
+            // Strip any existing "(Something)" qualifier before trying the #Inert
+            // fallback - infobox_item can resolve this item to either the plain name or
+            // a parenthetical variant depending on which item_id was queried, but
+            // neither form is what dropsline actually uses ("Pendant of ates#Inert",
+            // with a literal #) - so the fallback needs the bare base name either way.
+            String baseName = itemName.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
+            fetchDropSourcesInertFallback(baseName, callback);
+        });
+    }
+
+    /**
+     * Matches "Reward casket (tier)" names (e.g. "Reward casket (hard)") - used to detect
+     * when the normal item-drops query's empty result means "look up the casket's own
+     * contents instead" rather than "this item genuinely has no sources".
+     */
+    public boolean isRewardCasketName(String itemName)
+    {
+        return java.util.regex.Pattern.compile("(?i)^Reward casket \\([^)]+\\)$").matcher(itemName.trim()).matches();
+    }
+
+    /**
+     * Surfaces a reward casket's actual contents (what it can give you) rather than what
+     * "drops" it - nothing does, reward caskets are earned by completing clue scrolls, not
+     * dropped by monsters, same as scroll boxes. Reuses the same page_name-filtered
+     * dropsline query already used for an NPC's own drop table - each reward item has its
+     * own dropsline row with page_name set to the casket's name, the same way a monster's
+     * drops are tracked, so this already surfaces them with no new query logic needed.
+     */
+    private void fetchRewardCasketContents(String casketName, Consumer<List<DropSource>> callback)
+    {
+        String query = "bucket('dropsline').select('item_name','drop_json')"
+                + ".where('page_name','" + escapeForBucketQuery(casketName) + "').limit(500).run()";
+
+        runBucketQuery(query, root -> callback.accept(parseNpcDropRows(root, casketName)));
+    }
+
+    /**
+     * Scroll boxes (e.g. "Scroll box (easy)") aren't directly dropped by anything - they're
+     * obtained "in place of" clue scrolls upon completing X Marks the Spot, a mechanical
+     * substitution rather than a real monster/shop source, so they have no dropsline entry
+     * of their own. The useful info for a player is the equivalent clue scroll's real
+     * sources (e.g. "Clue scroll (easy)"). Returns null for anything that isn't a
+     * "Scroll box (tier)" name.
+     */
+    private String scrollBoxToClueScrollName(String itemName)
+    {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?i)^Scroll box \\(([^)]+)\\)$").matcher(itemName.trim());
+        if (!matcher.matches())
+        {
+            return null;
+        }
+        return "Clue scroll (" + matcher.group(1) + ")";
+    }
+
+    /**
+     * Fetches the equivalent clue scroll's own drop sources on a scroll box's behalf - see
+     * scrollBoxToClueScrollName for why this substitution makes sense.
+     */
+    private void fetchDropSourcesForClueScrollEquivalent(String clueScrollName, Consumer<List<DropSource>> callback)
+    {
+        String query = "bucket('dropsline').select('page_name','drop_json')"
+                + ".where('item_name','" + escapeForBucketQuery(clueScrollName) + "').limit(500).run()";
+
+        runBucketQuery(query, root ->
+        {
+            callback.accept(parseDropRows(root, clueScrollName));
+        });
+    }
+
+    /**
+     * Fallback for chargeable items whose drop-table entry is filed under a "#Inert"
+     * section suffix that infobox_item's own item_name field doesn't reflect. Pendant of
+     * ates resolves to either "Pendant of ates" or "Pendant of ates (inert)" via
+     * infobox_item depending on which item_id was queried, but the actual drop table entry
+     * uses "Pendant of ates#Inert" - the same "#Section" anchor convention used elsewhere
+     * for page_name_sub values (e.g. "Dragon defender#Normal"). Only tried when the
+     * plain-name query comes back empty, so this can't override a real result.
+     */
+    private void fetchDropSourcesInertFallback(String itemName, Consumer<List<DropSource>> callback)
+    {
+        String inertName = itemName + "#Inert";
+        String query = "bucket('dropsline').select('page_name','drop_json')"
+                + ".where('item_name','" + escapeForBucketQuery(inertName) + "').limit(500).run()";
+
+        runBucketQuery(query, root ->
+        {
+            callback.accept(parseDropRows(root, inertName));
+        });
     }
 
     /**
@@ -407,10 +643,9 @@ public class ItemInfoClient
                     DropSource ds = new DropSource();
                     ds.source = firstString(row, "page_name");
 
-                    // Field names confirmed by inspecting an actual live drop_json blob
-                    // (e.g. for Rune arrow): {"Rarity":"3/128","Drop level":"304",
-                    // "Drop Quantity":"8",...}. Note it's "Drop Quantity", not "Quantity" -
-                    // that mismatch was the actual bug that made every item show up empty.
+                    // Field names from the actual drop_json blob (e.g. for Rune arrow):
+                    // {"Rarity":"3/128","Drop level":"304","Drop Quantity":"8",...}.
+                    // Note it's "Drop Quantity", not "Quantity".
                     if (row.has("drop_json"))
                     {
                         String rawJson = firstString(row, "drop_json");
@@ -443,12 +678,9 @@ public class ItemInfoClient
                                 }
                                 if (blob.has("Rarity"))
                                 {
-                                    // The raw value here is often an unreduced fraction like
-                                    // "6/134.35" or "7/131" - the wiki's own page always
-                                    // displays these reduced to "1 in N" form (verified against
-                                    // a live page: 131/7 -> "1/18.71", 100/5 -> "1/20",
-                                    // 134.35/6 -> "1/22.39", matching exactly), so reduce here
-                                    // rather than showing the raw fraction as-is.
+                                    // Raw value is often an unreduced fraction like
+                                    // "6/134.35" - the wiki's own pages show these
+                                    // reduced to "1 in N" form, so reduce here too.
                                     ds.rarity = reduceRarityFraction(blob.get("Rarity").getAsString());
                                 }
                                 if (blob.has("Drop Quantity"))
@@ -484,13 +716,10 @@ public class ItemInfoClient
 
                     // Ammo-recycling equipment mechanics (Ranging cape#assembler, Ava's
                     // assembler, Assembler max cape, etc.) get tracked in this same
-                    // dropsline bucket as genuine combat drops - confirmed via live data
-                    // (Mithril arrow) that these are actually equipment mechanics (Ava's
-                    // devices recover ammo ~98.75% of the time), not monster/reward drops.
-                    // All confirmed variants share the word "assembler" in their source
-                    // name, which reliably identifies this specific mechanic family
-                    // without needing to hardcode every exact page name (e.g. this also
-                    // catches "Masori assembler" automatically).
+                    // dropsline bucket, but they're equipment mechanics (recovering ammo
+                    // on hit), not monster/reward drops. All variants share the word
+                    // "assembler" in their source name, which catches this family without
+                    // needing to hardcode every exact page name.
                     if (ds.source != null && !ds.source.toLowerCase().contains("assembler"))
                     {
                         results.add(ds);
@@ -579,6 +808,341 @@ public class ItemInfoClient
     }
 
     /**
+     * Fetches Attack/Defence/Other combat bonuses for a wieldable weapon or equipment
+     * piece. Lives in the 'infobox_bonuses' bucket, not 'infobox_item', filtered by
+     * 'page_name_sub' rather than 'item_name'/'page_name'. Values come back as plain
+     * numbers here, not the single-element JSON arrays seen elsewhere (e.g. item_id's
+     * "id" field).
+     * <p>
+     * The plain item name often isn't the real page_name_sub value - e.g. "Toxic
+     * blowpipe" returns nothing, the actual value is "Toxic blowpipe#Charged" (multi-
+     * version items use a "#Section" suffix). So this first resolves the real
+     * page_name_sub via infobox_item (queried by item_name), then uses that for the
+     * bonuses lookup - falling back to the plain name if resolution fails, since some
+     * items (e.g. Rune scimitar) match directly with no resolution needed.
+     * <p>
+     * Items with multiple variants sharing one item_name (e.g. Pendant of ates - Inert
+     * and Charged forms) can have several infobox_item rows for that name, and a
+     * name-only resolve query can pick the wrong variant. So when the caller knows the
+     * item's actual ID, this queries by item_id alone instead (each variant has its own
+     * distinct page_name_sub, so combining the correct ID with the wrong item_name would
+     * just never match anything). Falls back to the name-only query if the ID-only query
+     * comes back empty for some other reason.
+     *
+     * @param itemId the item's actual resolved in-game ID if known, or -1 if unknown
+     * @param callback receives the parsed bonuses, or null if the item has none (not
+     *                  equipment, or no data found)
+     */
+    public void fetchCombatBonuses(String itemName, int itemId, Consumer<CombatBonuses> callback)
+    {
+        if (itemId >= 0)
+        {
+            String filteredResolveQuery = "bucket('infobox_item').select('page_name_sub')"
+                    + ".where('item_id'," + itemId + ").limit(1).run()";
+
+            runBucketQuery(filteredResolveQuery, filteredRoot ->
+            {
+                String resolved = extractPageNameSub(filteredRoot);
+                if (resolved != null)
+                {
+                    fetchCombatBonusesByPageNameSub(resolved, callback);
+                }
+                else
+                {
+                    fetchCombatBonusesUnfiltered(itemName, callback);
+                }
+            });
+        }
+        else
+        {
+            fetchCombatBonusesUnfiltered(itemName, callback);
+        }
+    }
+
+    /**
+     * Original name-only resolve + fetch, used when the item ID is unknown or the
+     * ID-filtered attempt above didn't find a match. Can still pick the wrong variant for
+     * items with multiple forms sharing one item_name, but is a safety net over losing
+     * bonus data entirely.
+     */
+    private void fetchCombatBonusesUnfiltered(String itemName, Consumer<CombatBonuses> callback)
+    {
+        String resolveQuery = "bucket('infobox_item').select('page_name_sub')"
+                + ".where('item_name','" + escapeForBucketQuery(itemName) + "').limit(1).run()";
+
+        runBucketQuery(resolveQuery, resolveRoot ->
+        {
+            String resolved = extractPageNameSub(resolveRoot);
+            fetchCombatBonusesByPageNameSub(resolved != null ? resolved : itemName, callback);
+        });
+    }
+
+    private String extractPageNameSub(JsonObject root)
+    {
+        try
+        {
+            if (root != null && root.has("bucket"))
+            {
+                JsonArray bucket = root.getAsJsonArray("bucket");
+                if (bucket.size() > 0)
+                {
+                    String resolved = firstString(bucket.get(0).getAsJsonObject(), "page_name_sub");
+                    if (resolved != null && !resolved.isEmpty())
+                    {
+                        return resolved;
+                    }
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            log.warn("Failed to extract page_name_sub", e);
+        }
+        return null;
+    }
+
+    private void fetchCombatBonusesByPageNameSub(String pageNameSub, Consumer<CombatBonuses> callback)
+    {
+        String query = "bucket('infobox_bonuses').select("
+                + "'stab_attack_bonus','slash_attack_bonus','crush_attack_bonus','magic_attack_bonus','range_attack_bonus',"
+                + "'stab_defence_bonus','slash_defence_bonus','crush_defence_bonus','magic_defence_bonus','range_defence_bonus',"
+                + "'strength_bonus','ranged_strength_bonus','magic_damage_bonus','prayer_bonus','weapon_attack_speed','weapon_attack_range')"
+                + ".where('page_name_sub','" + escapeForBucketQuery(pageNameSub) + "').limit(1).run()";
+
+        runBucketQuery(query, root ->
+        {
+            try
+            {
+                if (root != null && root.has("bucket"))
+                {
+                    JsonArray bucket = root.getAsJsonArray("bucket");
+                    if (bucket.size() > 0)
+                    {
+                        JsonObject row = bucket.get(0).getAsJsonObject();
+                        CombatBonuses bonuses = new CombatBonuses();
+                        bonuses.stabAttack = firstInt(row, "stab_attack_bonus");
+                        bonuses.slashAttack = firstInt(row, "slash_attack_bonus");
+                        bonuses.crushAttack = firstInt(row, "crush_attack_bonus");
+                        bonuses.magicAttack = firstInt(row, "magic_attack_bonus");
+                        bonuses.rangeAttack = firstInt(row, "range_attack_bonus");
+                        bonuses.stabDefence = firstInt(row, "stab_defence_bonus");
+                        bonuses.slashDefence = firstInt(row, "slash_defence_bonus");
+                        bonuses.crushDefence = firstInt(row, "crush_defence_bonus");
+                        bonuses.magicDefence = firstInt(row, "magic_defence_bonus");
+                        bonuses.rangeDefence = firstInt(row, "range_defence_bonus");
+                        bonuses.strength = firstInt(row, "strength_bonus");
+                        bonuses.rangedStrength = firstInt(row, "ranged_strength_bonus");
+                        bonuses.magicDamage = firstInt(row, "magic_damage_bonus");
+                        bonuses.prayer = firstInt(row, "prayer_bonus");
+                        bonuses.attackSpeed = firstString(row, "weapon_attack_speed");
+                        bonuses.attackRange = firstString(row, "weapon_attack_range");
+                        callback.accept(bonuses);
+                        return;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                log.warn("Failed to fetch combat bonuses for {}", pageNameSub, e);
+            }
+            callback.accept(null);
+        });
+    }
+
+    /**
+     * Fetches combat levels and bonuses for an NPC. Lives in the 'infobox_monster' bucket,
+     * filtered by 'page_name' (page_name_sub, used on the item side, returns nothing
+     * here). A monster with multiple combat-level forms (e.g. Dark wizard - level
+     * 7/11/20/22/23, all sharing one wiki page) can return several rows for one page_name.
+     * <p>
+     * Fetches every row sharing that page_name (limit 20) and picks the closest
+     * combat_level match itself, rather than trusting a plain page_name-only query with
+     * limit(1) to happen to return the right form - that approach picked arbitrary
+     * (visibly wrong) forms for several multi-form monsters.
+     *
+     * @param combatLevel the NPC's actual in-game combat level if known, or -1 if unknown
+     *                    (e.g. reached via "Back" with no drop-row level context available)
+     * @param callback receives the parsed stats, or null if the NPC has none (not
+     *                  attackable, or no data found)
+     */
+    public void fetchNpcCombatStats(String npcName, int combatLevel, Consumer<NpcCombatStats> callback)
+    {
+        String query = "bucket('infobox_monster').select("
+                + "'combat_level','hitpoints','attack_level','strength_level','defence_level','magic_level','ranged_level',"
+                + "'attack_bonus','strength_bonus','magic_attack_bonus','range_attack_bonus',"
+                + "'stab_defence_bonus','slash_defence_bonus','crush_defence_bonus','magic_defence_bonus','range_defence_bonus',"
+                + "'light_range_defence_bonus','standard_range_defence_bonus','heavy_range_defence_bonus')"
+                + ".where('page_name','" + escapeForBucketQuery(npcName) + "').limit(20).run()";
+
+        runBucketQuery(query, root ->
+        {
+            JsonObject bestRow = pickBestNpcCombatStatsRow(root, combatLevel);
+            if (bestRow != null)
+            {
+                NpcCombatStats stats = parseNpcCombatStatsFields(bestRow);
+                // Uses the chosen row's own actual combat_level, not the original
+                // (possibly non-matching) combatLevel parameter - important when no exact
+                // match existed, or combatLevel was unknown (-1) to begin with, so the
+                // enrichment query below stays consistent with whichever row was actually
+                // picked rather than filtering for a different, mismatched level.
+                int resolvedCombatLevel = firstInt(bestRow, "combat_level");
+                fetchNpcExtraStats(npcName, resolvedCombatLevel, stats, callback);
+            }
+            else
+            {
+                callback.accept(null);
+            }
+        });
+    }
+
+    /**
+     * Picks the best-matching row (not yet parsed into NpcCombatStats) out of every
+     * infobox_monster row sharing this page_name - an exact combat_level match if one
+     * exists and combatLevel is known, otherwise the row whose own combat_level is
+     * numerically closest to it, or just the first row if combatLevel is unknown (-1).
+     * Returns the raw row rather than parsed stats so the caller can also read its
+     * actual combat_level.
+     */
+    private JsonObject pickBestNpcCombatStatsRow(JsonObject root, int combatLevel)
+    {
+        try
+        {
+            if (root == null || !root.has("bucket"))
+            {
+                return null;
+            }
+            JsonArray bucket = root.getAsJsonArray("bucket");
+            if (bucket.size() == 0)
+            {
+                return null;
+            }
+
+            JsonObject bestRow = null;
+            int bestDiff = Integer.MAX_VALUE;
+            for (JsonElement rowElement : bucket)
+            {
+                JsonObject row = rowElement.getAsJsonObject();
+                if (combatLevel < 0)
+                {
+                    bestRow = row;
+                    break;
+                }
+                int rowLevel = firstInt(row, "combat_level");
+                int diff = Math.abs(rowLevel - combatLevel);
+                if (diff < bestDiff)
+                {
+                    bestDiff = diff;
+                    bestRow = row;
+                    if (diff == 0)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (bestRow == null)
+            {
+                return null;
+            }
+            return bestRow;
+        }
+        catch (Exception e)
+        {
+            log.warn("Failed to pick best NPC combat stats row", e);
+            return null;
+        }
+    }
+
+    private NpcCombatStats parseNpcCombatStatsFields(JsonObject row)
+    {
+        NpcCombatStats stats = new NpcCombatStats();
+        stats.hitpoints = firstInt(row, "hitpoints");
+        stats.attackLevel = firstInt(row, "attack_level");
+        stats.strengthLevel = firstInt(row, "strength_level");
+        stats.defenceLevel = firstInt(row, "defence_level");
+        stats.magicLevel = firstInt(row, "magic_level");
+        stats.rangedLevel = firstInt(row, "ranged_level");
+        stats.attackBonus = firstInt(row, "attack_bonus");
+        stats.strengthBonus = firstInt(row, "strength_bonus");
+        stats.magicAttackBonus = firstInt(row, "magic_attack_bonus");
+        stats.rangeAttackBonus = firstInt(row, "range_attack_bonus");
+        stats.stabDefenceBonus = firstInt(row, "stab_defence_bonus");
+        stats.slashDefenceBonus = firstInt(row, "slash_defence_bonus");
+        stats.crushDefenceBonus = firstInt(row, "crush_defence_bonus");
+        stats.magicDefenceBonus = firstInt(row, "magic_defence_bonus");
+        stats.rangeDefenceBonus = firstInt(row, "range_defence_bonus");
+        stats.lightRangeDefenceBonus = firstInt(row, "light_range_defence_bonus");
+        stats.standardRangeDefenceBonus = firstInt(row, "standard_range_defence_bonus");
+        stats.heavyRangeDefenceBonus = firstInt(row, "heavy_range_defence_bonus");
+        return stats;
+    }
+
+    /**
+     * Enrichment query for a handful of field names that took some digging to pin down
+     * (per the Module:Infobox Monster Lua source):
+     * - rngbns_bucket = 'range_strength_bonus' (not 'ranged_strength_bonus')
+     * - mbns_bucket = 'magic_damage_bonus'
+     * - elementalweaknesstype_bucket = 'elemental_weakness'
+     * - elementalweaknesspercent_bucket = 'elemental_weakness_percent'
+     * <p>
+     * Kept as its own separate query (not merged into fetchNpcCombatStats above) so the
+     * main query stays isolated if anything here turns out wrong.
+     */
+    private void fetchNpcExtraStats(String npcName, int combatLevel, NpcCombatStats stats, Consumer<NpcCombatStats> callback)
+    {
+        String query = "bucket('infobox_monster').select("
+                + "'magic_damage_bonus','range_strength_bonus','elemental_weakness','elemental_weakness_percent')"
+                + ".where('page_name','" + escapeForBucketQuery(npcName) + "')"
+                + ".where('combat_level'," + combatLevel + ").limit(1).run()";
+
+        runBucketQuery(query, root ->
+        {
+            try
+            {
+                if (root != null && root.has("bucket"))
+                {
+                    JsonArray bucket = root.getAsJsonArray("bucket");
+                    if (bucket.size() > 0)
+                    {
+                        JsonObject row = bucket.get(0).getAsJsonObject();
+                        stats.magicDamageBonus = firstInt(row, "magic_damage_bonus");
+                        stats.rangedStrengthBonus = firstInt(row, "range_strength_bonus");
+                        stats.elementalWeaknessType = firstString(row, "elemental_weakness");
+                        stats.elementalWeaknessPercent = firstInt(row, "elemental_weakness_percent");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                log.warn("Failed to fetch extra NPC combat stats for {}", npcName, e);
+            }
+            callback.accept(stats);
+        });
+    }
+
+    /**
+     * Like firstString, but for the plain-integer bonus fields in infobox_bonuses (not
+     * wrapped in a JSON array the way e.g. item_id's "id" field is). Missing/null fields
+     * default to 0 rather than null, since callers display these as plain numbers
+     * (e.g. "+44") where a missing value should just read as no bonus.
+     */
+    private int firstInt(JsonObject row, String field)
+    {
+        if (!row.has(field) || row.get(field).isJsonNull())
+        {
+            return 0;
+        }
+        try
+        {
+            return row.get(field).getAsInt();
+        }
+        catch (Exception e)
+        {
+            return 0;
+        }
+    }
+
+    /**
      * Shared plumbing for a Bucket API call: builds the request, fires it, and hands the
      * parsed JSON root object back to the callback (or null on any failure). Individual
      * callers are responsible for interpreting the "bucket" array inside the root object.
@@ -619,10 +1183,9 @@ public class ItemInfoClient
                     JsonObject root = gson.fromJson(response.body().string(), JsonObject.class);
                     if (root != null && root.has("error"))
                     {
-                        // Logging the raw error object (not just the query) is the whole point
-                        // here - this is what tells us whether a select()/where() field name
-                        // was wrong, since the Bucket API doesn't publish a field schema we can
-                        // check against ahead of time.
+                        // Log the raw error object - the Bucket API doesn't publish a
+                        // field schema, so this is how a wrong select()/where() field
+                        // name gets caught.
                         log.warn("Bucket query returned an error for {} - response: {}", url, root.get("error"));
                         callback.accept(null);
                         return;
@@ -668,26 +1231,134 @@ public class ItemInfoClient
     }
 
     /**
+     * Strict, fallback-free version of resolveItemIdByName - only the exact page_name
+     * match on the item_id bucket, none of that method's looser fallback chain (case-
+     * toggle, then stripping the parenthetical entirely). Needed for "is this exact name
+     * actually a real item?" navigation decisions, as opposed to icon-resolution
+     * best-effort lookups where a looser match is an acceptable tradeoff - reusing the
+     * full fallback chain here once caused a monster's sub-location-qualified name (e.g.
+     * "Cyclops (Warriors' Guild Basement)") to incorrectly resolve as an item, since the
+     * bare-base-name fallback ("Cyclops" alone) matched some unrelated real item.
+     */
+    public void resolveExactItemIdStrict(String itemName, Consumer<Integer> callback)
+    {
+        String query = "bucket('item_id').select('id')"
+                + ".where('page_name','" + escapeForBucketQuery(itemName) + "').limit(1).run()";
+
+        runBucketQuery(query, root ->
+        {
+            try
+            {
+                if (root != null && root.has("bucket"))
+                {
+                    JsonArray bucket = root.getAsJsonArray("bucket");
+                    if (bucket.size() > 0)
+                    {
+                        JsonObject row = bucket.get(0).getAsJsonObject();
+                        if (row.has("id"))
+                        {
+                            JsonArray idArray = row.getAsJsonArray("id");
+                            int bestId = -1;
+                            for (JsonElement idElement : idArray)
+                            {
+                                String idStr = idElement.getAsString();
+                                if (idStr.matches("\\d+"))
+                                {
+                                    int id = Integer.parseInt(idStr);
+                                    if (id > bestId)
+                                    {
+                                        bestId = id;
+                                    }
+                                }
+                            }
+                            if (bestId >= 0)
+                            {
+                                callback.accept(bestId);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                log.warn("Failed to strictly resolve item id for {}", itemName, e);
+            }
+            callback.accept(null);
+        });
+    }
+
+    /**
+     * Same idea as resolveExactItemIdStrict, but checks the 'object_id' bucket instead -
+     * some drop-table "sources" are actually world objects/scenery, not items or monsters
+     * (e.g. "Chest (Tombs of Amascut)", a raid reward chest). Without this check, a
+     * drop-row click routing between "is this an item?" and "is this an NPC?" has no way
+     * to correctly identify an object, and falls through to an NPC search that doesn't
+     * match anything real.
+     */
+    public void resolveExactObjectIdStrict(String objectName, Consumer<Integer> callback)
+    {
+        String query = "bucket('object_id').select('id')"
+                + ".where('page_name','" + escapeForBucketQuery(objectName) + "').limit(1).run()";
+
+        runBucketQuery(query, root ->
+        {
+            try
+            {
+                if (root != null && root.has("bucket"))
+                {
+                    JsonArray bucket = root.getAsJsonArray("bucket");
+                    if (bucket.size() > 0)
+                    {
+                        JsonObject row = bucket.get(0).getAsJsonObject();
+                        if (row.has("id"))
+                        {
+                            JsonArray idArray = row.getAsJsonArray("id");
+                            int bestId = -1;
+                            for (JsonElement idElement : idArray)
+                            {
+                                String idStr = idElement.getAsString();
+                                if (idStr.matches("\\d+"))
+                                {
+                                    int id = Integer.parseInt(idStr);
+                                    if (id > bestId)
+                                    {
+                                        bestId = id;
+                                    }
+                                }
+                            }
+                            if (bestId >= 0)
+                            {
+                                callback.accept(bestId);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                log.warn("Failed to strictly resolve object id for {}", objectName, e);
+            }
+            callback.accept(null);
+        });
+    }
+
+    /**
      * Resolves an item's real game ID from its wiki page name alone - the reverse of the
      * usual flow (which starts from an in-game right-click and already has the ID).
-     * Confirmed via a live query that 'page_name' works as a where() filter on the
-     * 'item_id' bucket. Note the result's "id" field comes back as a JSON array (e.g.
-     * {"id":["300"]}), not a plain value - presumably to support multi-version items.
-     *
+     * Uses 'page_name' as a where() filter on the 'item_id' bucket. Note the result's
+     * "id" field comes back as a JSON array (e.g. {"id":["300"]}), not a plain value -
+     * presumably to support multi-version items.
+     * <p>
      * If the direct lookup finds nothing, falls back to the 'infobox_item' bucket, queried
-     * by 'item_name' instead of 'page_name' - confirmed via live testing that this
-     * correctly resolves cases 'item_id' misses entirely, for two different reasons:
-     * - "Antidote++(4)" isn't its own page at all (it redirects to a shared "Antidote++"
-     *   article with four dose variants) - item_id only indexes canonical page titles, but
-     *   infobox_item is indexed by item_name and finds it directly, no redirect-following
-     *   needed.
-     * - "Key (medium)" resolves to ELEVEN different IDs (different guards/contexts drop
+     * by 'item_name' instead of 'page_name' - this resolves cases 'item_id' misses:
+     * - "Antidote++(4)" isn't its own page (it redirects to a shared "Antidote++" article
+     *   with four dose variants) - item_id only indexes canonical page titles, but
+     *   infobox_item is indexed by item_name and finds it directly.
+     * - "Key (medium)" resolves to eleven different IDs (different guards/contexts drop
      *   different underlying item variants that all display as "Key (medium)") - since
-     *   they're all the same icon visually, the first one is used rather than needing to
-     *   disambiguate further.
-     * This replaced an earlier, much more complex implementation that manually followed
-     * redirects and matched per-version "nameN" infobox fields - infobox_item turned out to
-     * already handle both of those cases (and more) in a single query.
+     *   they're all the same icon visually, the first one is used.
      *
      * @param callback receives the resolved ID, or null if the item couldn't be resolved
      */
@@ -750,18 +1421,81 @@ public class ItemInfoClient
     }
 
     /**
-     * Some items (clue scrolls especially) have gone through many graphical reworks over
-     * the years, each apparently keeping its own tracked ID under the same display name -
-     * confirmed via a live query returning 150+ IDs for "Clue scroll (medium)" alone,
-     * including outright junk values ("undefined", "hist2841"). With no explicit ordering,
-     * taking just the first result was effectively arbitrary - it could easily land on a
-     * defunct, years-old ID with no valid sprite in the current game client, causing the
-     * icon to silently fail even though an ID was "resolved". Instead, this scans every
-     * candidate across all returned rows and takes the largest valid numeric ID, since
-     * OSRS generally assigns higher IDs to more recently-added items - a reasonable
-     * heuristic for "the current version" rather than an arbitrary pick.
+     * Resolves an item's ID via infobox_item, trying up to three name variants in order:
+     * the name as given, then (if it has a parenthetical qualifier) that qualifier's case
+     * toggled, then finally the bare base name with the qualifier stripped entirely. See
+     * tryBareBaseName for why that last resort exists - Coin pouch (dropped by Hero)
+     * showed neither case variant of the qualifier matching anything at all.
      */
     private void resolveItemIdViaInfoboxItem(String itemName, Consumer<Integer> callback)
+    {
+        queryInfoboxItemForId(itemName, bestId ->
+        {
+            if (bestId != null)
+            {
+                callback.accept(bestId);
+                return;
+            }
+
+            String toggledCaseName = toggleParentheticalCase(itemName);
+            if (toggledCaseName != null)
+            {
+                queryInfoboxItemForId(toggledCaseName, toggledId ->
+                {
+                    if (toggledId != null)
+                    {
+                        callback.accept(toggledId);
+                        return;
+                    }
+
+                    tryBareBaseName(itemName, callback);
+                });
+            }
+            else
+            {
+                tryBareBaseName(itemName, callback);
+            }
+        });
+    }
+
+    /**
+     * Final fallback: strips a trailing "(qualifier)" entirely and tries the bare base
+     * name alone - e.g. "Coin pouch (Hero)" -> "Coin pouch". Coin pouch (dropped by Hero)
+     * showed neither the lowercase nor Title-case qualifier variant matching any
+     * infobox_item row, meaning the per-NPC qualifier isn't part of that item's actual
+     * item_name field the way it is for e.g. Pendant of ates. Many multi-version items
+     * on this wiki share one identical item_name across every
+     * version (only the icon/item_id differ per version, not the display name), so this
+     * is a reasonable last resort - it may not resolve to the exact NPC-specific variant's
+     * own icon, but a real, generic icon for the item beats showing none at all. Skipped
+     * entirely if there's no parenthetical to strip in the first place.
+     */
+    private void tryBareBaseName(String itemName, Consumer<Integer> callback)
+    {
+        String bareBaseName = itemName.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
+        if (bareBaseName.equals(itemName) || bareBaseName.isEmpty())
+        {
+            callback.accept(null);
+            return;
+        }
+
+        queryInfoboxItemForId(bareBaseName, callback);
+    }
+
+    /**
+     * Some items (clue scrolls especially) have gone through many graphical reworks over
+     * the years, each keeping its own tracked ID under the same display name - a live
+     * query can return 150+ IDs for "Clue scroll (medium)" alone, including junk values
+     * ("undefined", "hist2841"). With no explicit ordering, taking the first result was
+     * effectively arbitrary and could land on a defunct ID with no valid sprite. Instead,
+     * this scans every candidate and takes the largest valid numeric ID, since OSRS
+     * generally assigns higher IDs to more recently-added items.
+     * <p>
+     * Extracted as a shared helper since it's reused across three name variants
+     * (original, case-toggled, bare-base-name) - the callback receives null (not an
+     * exception) when no valid ID is found, so callers can chain fallback attempts.
+     */
+    private void queryInfoboxItemForId(String itemName, Consumer<Integer> callback)
     {
         String query = "bucket('infobox_item').select('item_id')"
                 + ".where('item_name','" + escapeForBucketQuery(itemName) + "').limit(200).run()";
@@ -807,6 +1541,32 @@ public class ItemInfoClient
             }
             callback.accept(null);
         });
+    }
+
+    /**
+     * Toggles the case of a trailing "(qualifier)" - lowercase becomes Title-case and vice
+     * versa. Returns null if the name has no such parenthetical, or if toggling would
+     * produce the exact same string (nothing meaningful to retry).
+     */
+    private String toggleParentheticalCase(String name)
+    {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^(.*) \\(([^)]+)\\)$").matcher(name);
+        if (!matcher.matches())
+        {
+            return null;
+        }
+
+        String base = matcher.group(1);
+        String qualifier = matcher.group(2);
+        String toggled = qualifier.equals(qualifier.toLowerCase())
+                ? qualifier.substring(0, 1).toUpperCase() + qualifier.substring(1)
+                : qualifier.toLowerCase();
+
+        if (toggled.equals(qualifier))
+        {
+            return null;
+        }
+        return base + " (" + toggled + ")";
     }
 
     /**
@@ -1184,11 +1944,10 @@ public class ItemInfoClient
                     NpcInfoboxData data = new NpcInfoboxData();
                     data.released = extractFieldWithFallback(infoboxBlock, "release", "released", versionIndex);
                     data.members = extractFieldWithFallback(infoboxBlock, "members", null, versionIndex);
-                    // Deliberately NOT falling back to "level" here - confirmed via real
-                    // data (Tool store 5, a player-owned house shop) that some non-monster
-                    // pages reuse "level" for an unrelated skill requirement (Construction
-                    // level to build the room), not a combat level at all. Only "combat"
-                    // (the dedicated Infobox Monster field) is unambiguous enough to trust.
+                    // Deliberately NOT falling back to "level" here - some non-monster
+                    // pages reuse "level" for an unrelated skill requirement (e.g. a
+                    // player-owned house shop's Construction level to build the room),
+                    // not a combat level. Only "combat" is unambiguous enough to trust.
                     data.combatLevel = extractFieldWithFallback(infoboxBlock, "combat", null, versionIndex);
                     data.race = extractFieldWithFallback(infoboxBlock, "race", null, versionIndex);
                     data.attackStyle = extractFieldWithFallback(infoboxBlock, "attack style", null, versionIndex);
@@ -1575,20 +2334,14 @@ public class ItemInfoClient
     private String extractField(String block, String fieldName)
     {
         // The lookahead stops at either "newline + next |field" or "newline + }}" (the
-        // infobox's own closing, which in properly-formatted wikitext is always on its own
-        // line) - NOT at any lone '}' character. The old version excluded '}' entirely from
-        // the captured value, which incorrectly truncated fields containing a nested
-        // template like "{{*}}" (a bullet-point marker some quest lists use) right at its
-        // first closing brace, e.g. capturing just "{{*" instead of the full value.
+        // infobox's own closing) - not at a lone '}' character, since that would
+        // truncate fields containing a nested template like "{{*}}" (a bullet-point
+        // marker some quest lists use).
         //
-        // [ \t]* (not \s*) is used immediately around the "=" sign specifically - \s*
-        // matches newlines too, so for a field with an EMPTY value (e.g. "|release1 = "
-        // immediately followed by a newline), the greedy \s* right after "=" would consume
-        // that newline and keep going, landing at the start of the NEXT field's line before
-        // the capture group even begins - confirmed via a real Bow cabinet page, where an
-        // empty "|release1 =" field caused the literal text "|release2 = " to be captured
-        // as if it were release1's own value. [ \t]* only skips same-line whitespace, so an
-        // empty value correctly stays empty instead of bleeding into the next field.
+        // [ \t]* (not \s*) around the "=" is deliberate - \s* matches newlines too, so
+        // an empty value (e.g. "|release1 = " followed immediately by a newline) would
+        // let the greedy \s* consume that newline and capture the start of the NEXT
+        // field's line as if it were this field's own value.
         Pattern pattern = Pattern.compile("\\|\\s*" + Pattern.quote(fieldName)
                 + "[ \\t]*=[ \\t]*(.*?)(?=\\n\\s*\\||\\n\\s*\\}\\})");
         Matcher matcher = pattern.matcher(block);
@@ -1604,9 +2357,8 @@ public class ItemInfoClient
         String cleaned = raw.replaceAll("\\[\\[(?:[^|\\]]*\\|)?([^\\]]*)\\]\\]", "$1");
         cleaned = cleaned.replaceAll("\\{\\{[^}]*\\}\\}", "");
         // Quest/reward-style fields often list multiple entries separated by <br/> tags
-        // (e.g. "{{*}} [[Cook's Assistant]]<br/>{{*}} [[Recipe for Disaster]]") - without
-        // this, the literal "<br/>" text was showing up in the display instead of being
-        // treated as a separator between entries.
+        // (e.g. "{{*}} [[Cook's Assistant]]<br/>{{*}} [[Recipe for Disaster]]") - treat
+        // as a separator rather than showing the literal "<br/>" text.
         cleaned = cleaned.replaceAll("(?i)<br\\s*/?>", ", ");
         cleaned = cleaned.replaceAll("\\s+", " ").trim();
         cleaned = cleaned.replaceAll("^,\\s*|,\\s*$", "").replaceAll(",\\s*,", ",");

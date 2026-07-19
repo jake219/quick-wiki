@@ -1,10 +1,12 @@
 package com.jake219.quickwiki;
 
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 
 import javax.swing.*;
+import javax.swing.border.Border;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -14,6 +16,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -30,15 +33,35 @@ public class ItemInfoPanel extends PluginPanel
     private final JLabel readMoreLabel = new JLabel("Read more");
     private final JLabel backToTopLabel = new JLabel("Back to top");
     private final JLabel backButtonLabel = new JLabel("Back");
+    private JLabel wikiLinkLabel;
+    private String currentWikiPageName;
     private final JLabel itemSourcesHeaderLabel = new JLabel();
     private final JLabel dropsHeaderLabel = new JLabel();
     private final JLabel shopsHeaderLabel = new JLabel();
+    private final JLabel combatStatsHeaderLabel = new JLabel();
+    private final JPanel combatStatsContent = new JPanel();
 
     private final JPanel viewContainer = new JPanel(new BorderLayout(0, 10));
     private JPanel mainView;
     private JPanel iconNamePanel;
     private JPanel emptyStatePanel;
+    private final JPanel attackBonusRow = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel attackBonusRow2 = new JPanel(new GridLayout(1, 2, 4, 0));
+    private final JPanel defenceBonusRow = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel defenceBonusRow2 = new JPanel(new GridLayout(1, 2, 4, 0));
+    private final JPanel otherBonusRow = new JPanel(new GridLayout(1, 4, 4, 0));
+    private final JPanel npcLevelsRow = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel npcLevelsRow2 = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel npcAttackRow = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel npcAttackRow2 = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel npcMeleeDefenceRow = new JPanel(new GridLayout(1, 3, 4, 0));
+    private final JPanel npcMagicDefenceRow = new JPanel(new GridLayout(1, 2, 4, 0));
+    private final JPanel npcRangedDefenceRow = new JPanel(new GridLayout(1, 3, 4, 0));
     private boolean hasShownFirstItem = false;
+    private Runnable combatStatsLoader;
+    private boolean combatStatsRequested = false;
+    private boolean combatStatsExpanded = false;
+    private boolean combatStatsHovering = false;
 
     private JPanel infoTable;
     private JPanel propertiesPanel;
@@ -70,19 +93,29 @@ public class ItemInfoPanel extends PluginPanel
     private boolean descriptionExpanded = true;
     private boolean descriptionHovering = false;
     private boolean itemSourcesExpanded = false;
-    /** When true, the outer "Item sources" accordion relabels to "Drops" and the redundant
-     * nested "Drops" toggle is skipped entirely - NPCs only have drops (no shops), so
-     * nesting it under an "Item sources" umbrella is an unnecessary extra click and a label
-     * that doesn't really fit a monster's own page. Items keep the normal two-level
+    /** When true, the outer "Item sources" accordion relabels to singleSectionLabel and the
+     * redundant nested "Drops" toggle is skipped entirely - a single-source case (a
+     * monster's own drops, or a reward casket's own contents) only has the one list (no
+     * shops), so nesting it under an "Item sources" umbrella is an unnecessary extra click
+     * and a label that doesn't really fit. Items keep the normal two-level
      * Item Sources > Drops/Shops structure. */
     private boolean npcDropsMode = false;
+    /** The label used for the outer accordion when npcDropsMode is true - "Drops" for an
+     * NPC's own drop table, "Rewards" for a reward casket's contents, etc. Set via
+     * setNpcDropsMode's label parameter; defaults to "Drops" for anywhere that still calls
+     * the old single-argument convenience overload. */
+    private String singleSectionLabel = "Drops";
     /** Registered by the plugin, since only it has access to game/client resources needed
      * to actually resolve and display a clicked drop-row name. Receives the clicked name
-     * (already stripped of any sub-location suffix for monster names). */
-    /** Registered by the plugin, since only it has access to game/client resources needed
-     * to actually resolve and display a clicked drop-row name. Receives the clicked name
-     * (already stripped of any sub-location suffix for monster names). */
-    private Consumer<String> dropRowClickListener;
+     * (already stripped of any sub-location suffix for monster names) and the drop row's
+     * own "level" field - for NPC navigation, this is a reliable proxy for the monster's
+     * actual combat level (verified against Frost Nagua's own drop_json blob, where "Drop
+     * level":"104" matched its Properties "Combat level: 104" exactly), used so drop-table
+     * navigation to a monster can reuse the same combat-level-filtered query direct
+     * in-world clicks already get, rather than always falling back to page_name-only.
+     * May be null/empty or not meaningful for item navigation (npcDropsMode) - the plugin
+     * ignores it in that case since items don't have combat levels. */
+    private BiConsumer<String, String> dropRowClickListener;
     /** Registered by the plugin - fired when the back button is clicked. */
     private Runnable backButtonListener;
     private boolean itemSourcesHovering = false;
@@ -112,6 +145,7 @@ public class ItemInfoPanel extends PluginPanel
      * which case monster levels are shown in a neutral color rather than guessing.
      */
     private int playerCombatLevel = -1;
+    private boolean showTooltips = true;
 
     /**
      * Real game sprites (coins item icon, equipment-weight icon), fetched once by the
@@ -266,9 +300,51 @@ public class ItemInfoPanel extends PluginPanel
             }
         });
 
+        JLabel wikiLinkLabel = new JLabel("Wiki");
+        wikiLinkLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        wikiLinkLabel.setForeground(NEUTRAL);
+        wikiLinkLabel.setIcon(createInfoIcon(NEUTRAL));
+        wikiLinkLabel.setIconTextGap(4);
+        wikiLinkLabel.setHorizontalTextPosition(SwingConstants.RIGHT);
+        wikiLinkLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        wikiLinkLabel.setVisible(false);
+        wikiLinkLabel.setToolTipText("Open this page on the official OSRS Wiki");
+        wikiLinkLabel.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                if (currentWikiPageName != null)
+                {
+                    openInBrowser(officialWikiUrl(currentWikiPageName));
+                }
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                wikiLinkLabel.setForeground(NEUTRAL_HOVER);
+                wikiLinkLabel.setIcon(createInfoIcon(NEUTRAL_HOVER));
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                wikiLinkLabel.setForeground(NEUTRAL);
+                wikiLinkLabel.setIcon(createInfoIcon(NEUTRAL));
+            }
+        });
+        this.wikiLinkLabel = wikiLinkLabel;
+
+        JPanel topRow = new JPanel(new BorderLayout());
+        topRow.setOpaque(false);
+        topRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        topRow.add(backButtonLabel, BorderLayout.WEST);
+        topRow.add(wikiLinkLabel, BorderLayout.EAST);
+
         iconNamePanel = new JPanel();
         iconNamePanel.setLayout(new BoxLayout(iconNamePanel, BoxLayout.Y_AXIS));
-        iconNamePanel.add(backButtonLabel);
+        iconNamePanel.add(topRow);
         iconNamePanel.add(Box.createVerticalStrut(6));
 
         // Icon and name sit side-by-side rather than stacked - saves a full row of
@@ -304,7 +380,15 @@ public class ItemInfoPanel extends PluginPanel
         // divider line underneath, matching the reference style - collapsible stats grid.
         propertiesPanel = new JPanel();
         propertiesPanel.setLayout(new BoxLayout(propertiesPanel, BoxLayout.Y_AXIS));
-        propertiesPanel.setOpaque(false);
+        // Opaque with the standard RuneLite panel background, not transparent like most
+        // panels in this file - this is specifically the panel where stale pixels have
+        // been observed ghosting through after the button's presence changes. Being
+        // non-opaque means Swing never guarantees a background clear before redrawing,
+        // regardless of which code path (ours or something else entirely, e.g. Item
+        // Sources' own independent async updates) triggers the repaint. A solid matching
+        // background fixes this at the root for every trigger, not just one call site.
+        propertiesPanel.setOpaque(true);
+        propertiesPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
         propertiesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         propertiesPanel.add(propertiesHeaderLabel);
         propertiesPanel.add(Box.createVerticalStrut(6));
@@ -358,7 +442,12 @@ public class ItemInfoPanel extends PluginPanel
 
         mainView = new JPanel();
         mainView.setLayout(new BoxLayout(mainView, BoxLayout.Y_AXIS));
+        // Opaque by JPanel's default already, but the color was never explicitly set
+        // before - fixing that for consistency with the other opacity fixes above.
+        mainView.setBackground(ColorScheme.DARK_GRAY_COLOR);
         mainView.add(propertiesPanel);
+        mainView.add(Box.createVerticalStrut(8));
+        mainView.add(buildCombatStatsSection());
         mainView.add(Box.createVerticalStrut(8));
         mainView.add(itemSourcesPanel);
         mainView.add(Box.createVerticalStrut(8));
@@ -369,7 +458,13 @@ public class ItemInfoPanel extends PluginPanel
         // Shows the empty-state message until the first item/NPC/object is actually
         // examined, at which point ensureItemViewShown() swaps this out for the real
         // icon/name + mainView layout (see showItem/showNonItem).
-        viewContainer.setOpaque(false);
+        // Opaque with the standard RuneLite panel background, not transparent - this is
+        // the top-level container for the entire panel's content, sitting above
+        // everything else. Given propertiesPanel becoming opaque alone didn't fully
+        // resolve the ghosting bug, this ancestor is a more likely actual source, since
+        // stale pixels here would affect the whole panel, not just one section.
+        viewContainer.setOpaque(true);
+        viewContainer.setBackground(ColorScheme.DARK_GRAY_COLOR);
         viewContainer.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         viewContainer.add(emptyStatePanel, BorderLayout.CENTER);
         add(viewContainer, BorderLayout.CENTER);
@@ -380,7 +475,7 @@ public class ItemInfoPanel extends PluginPanel
      * info row's click handler below.
      */
     private static final String PLUGIN_REPO_URL = "https://github.com/jake219/quick-wiki/blob/main/README.md";
-    private static final String PLUGIN_VERSION = "1.0.3";
+    private static final String PLUGIN_VERSION = "1.0.4";
 
     /**
      * Builds the friendly placeholder shown before the user has searched anything, so the
@@ -417,33 +512,33 @@ public class ItemInfoPanel extends PluginPanel
         panel.add(Box.createVerticalStrut(10));
         panel.add(body);
         panel.add(Box.createVerticalStrut(20));
-        panel.add(buildInfoRow());
+        panel.add(buildSupportRow());
         return panel;
     }
 
     /**
-     * A clickable "View on GitHub" row - icon, text, trailing chevron - matching the
-     * icon+text+arrow row style from the reference screenshot. Opens PLUGIN_REPO_URL in
-     * the system browser.
+     * A second clickable row right below "View on GitHub", same style, linking to the same
+     * repo - lets users report bugs/request features, or support the developer if they'd
+     * like to, all via the one link the developer already maintains.
      */
-    private JPanel buildInfoRow()
+    private JPanel buildSupportRow()
     {
         JLabel icon = new JLabel(createInfoIcon(NEUTRAL));
         icon.setAlignmentX(Component.LEFT_ALIGNMENT);
+        icon.setVerticalAlignment(SwingConstants.TOP);
 
-        JLabel text = new JLabel("View on GitHub");
-        text.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        Font textFont = new Font("Segoe UI", Font.PLAIN, 11);
+        JLabel text = new JLabel("<html>" + wrapTextManually("Report Issues or Support the Developer", 160, textFont) + "</html>");
+        text.setFont(textFont);
         text.setForeground(NEUTRAL);
-
-        JLabel chevron = new JLabel(createTriangleIcon(DIR_RIGHT, NEUTRAL));
 
         JPanel row = new JPanel(new BorderLayout());
         row.setOpaque(false);
         row.setAlignmentX(Component.CENTER_ALIGNMENT);
-        row.setMaximumSize(new Dimension(190, 26));
+        row.setMaximumSize(new Dimension(230, 42));
         row.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         row.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 1, 1, 1, new Color(255, 255, 255, 30)),
+                new RoundedLineBorder(new Color(255, 255, 255, 30), 10),
                 BorderFactory.createEmptyBorder(4, 8, 4, 8)
         ));
 
@@ -455,7 +550,6 @@ public class ItemInfoPanel extends PluginPanel
         left.add(text);
 
         row.add(left, BorderLayout.WEST);
-        row.add(chevron, BorderLayout.EAST);
 
         MouseAdapter listener = new MouseAdapter()
         {
@@ -481,7 +575,6 @@ public class ItemInfoPanel extends PluginPanel
         left.addMouseListener(listener);
         text.addMouseListener(listener);
         icon.addMouseListener(listener);
-        chevron.addMouseListener(listener);
 
         return row;
     }
@@ -504,6 +597,39 @@ public class ItemInfoPanel extends PluginPanel
         {
             log.warn("Quick Wiki: failed to open {}", url, e);
         }
+    }
+
+    /**
+     * Builds the real, official OSRS Wiki page URL for a given page name - standard
+     * MediaWiki convention (spaces become underscores in the path). Falls back to an
+     * unencoded URL if UTF-8 encoding somehow isn't available, rather than failing to
+     * open anything at all.
+     */
+    private String officialWikiUrl(String pageName)
+    {
+        String withUnderscores = pageName.replace(' ', '_');
+        try
+        {
+            return "https://oldschool.runescape.wiki/w/" + java.net.URLEncoder.encode(withUnderscores, "UTF-8");
+        }
+        catch (Exception e)
+        {
+            return "https://oldschool.runescape.wiki/w/" + withUnderscores;
+        }
+    }
+
+    /**
+     * Called by the plugin whenever an item/NPC/object is displayed, with the exact
+     * resolved wiki page name (same name already used for fetchDescription/fetchInfobox
+     * etc.) - lets the top-right "Wiki" button open that exact page on the real,
+     * official wiki, for users who want the full page rather than just this panel's
+     * summary. Pass null to hide the button entirely (e.g. before anything's been
+     * searched yet).
+     */
+    public void setWikiPageName(String pageName)
+    {
+        this.currentWikiPageName = pageName;
+        wikiLinkLabel.setVisible(pageName != null);
     }
 
     /**
@@ -559,6 +685,478 @@ public class ItemInfoPanel extends PluginPanel
     }
 
     /**
+     * Sets up the lazy loader for Combat Stats, called once per item (even non-equipable
+     * ones - the accordion is always present, and shows "No combat stats available" if
+     * the fetch comes back empty, rather than needing to know in advance whether an item
+     * has bonuses). This replaced an earlier button-based design that dynamically added
+     * and removed itself from propertiesPanel and caused a persistent visual ghosting
+     * bug - reusing this panel's existing accordion pattern (the same one Item Sources
+     * and Description already use) sidesteps that problem entirely.
+     *
+     * @param loader fetches combat bonuses and calls displayCombatBonuses() once ready -
+     *               lazy, only runs the first time the button is actually clicked for this
+     *               item, matching the same lazy-load pattern as Item Sources.
+     */
+    public void setCombatStatsAvailable(Runnable loader)
+    {
+        combatStatsLoader = loader;
+        combatStatsRequested = false;
+        combatStatsContent.removeAll();
+        if (combatStatsExpanded)
+        {
+            if (loader != null)
+            {
+                combatStatsContent.add(makeSourcesInfoLabel("Loading..."));
+                combatStatsRequested = true;
+                loader.run();
+            }
+            else
+            {
+                // Confirmed via a real report: switching from an item with bonuses
+                // (accordion expanded) to one without left "Loading..." stuck on screen
+                // forever, since there was no loader left to ever replace it. We already
+                // know upfront there's nothing to fetch, so show the real empty state
+                // immediately instead.
+                JLabel noCombatStatsLabel = makeSourcesInfoLabel("No combat stats available.");
+                noCombatStatsLabel.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
+                combatStatsContent.add(noCombatStatsLabel);
+            }
+        }
+        revalidate();
+        repaint();
+    }
+
+    private void toggleCombatStats()
+    {
+        combatStatsExpanded = !combatStatsExpanded;
+        updateAccordionHeader(combatStatsHeaderLabel, "Combat Stats", combatStatsExpanded, combatStatsHovering);
+        combatStatsContent.setVisible(combatStatsExpanded);
+
+        if (combatStatsExpanded && !combatStatsRequested)
+        {
+            combatStatsRequested = true;
+            combatStatsContent.removeAll();
+            if (combatStatsLoader != null)
+            {
+                combatStatsContent.add(makeSourcesInfoLabel("Loading..."));
+                combatStatsLoader.run();
+            }
+            else
+            {
+                // Same fix as setCombatStatsAvailable's null-loader case - if this item
+                // was set up while the accordion was collapsed (so no content was
+                // populated then), expanding it now would otherwise show a blank area
+                // instead of the real empty state.
+                JLabel noCombatStatsLabel = makeSourcesInfoLabel("No combat stats available.");
+                noCombatStatsLabel.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
+                combatStatsContent.add(noCombatStatsLabel);
+            }
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * Shows or hides the whole "Combat Stats" accordion entirely - used to hide it for
+     * Objects, which have no combat stats at all (unlike items/NPCs, where an
+     * always-empty "No combat stats available" state can still legitimately apply to some
+     * of them). Same pattern as setShopsSectionVisible above, for the same reason: a
+     * section that structurally can't ever apply to a category shouldn't be shown as an
+     * always-empty toggle for it.
+     */
+    public void setCombatStatsSectionVisible(boolean visible)
+    {
+        combatStatsHeaderLabel.setVisible(visible);
+        combatStatsContent.setVisible(visible && combatStatsExpanded);
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * Builds the Combat Stats accordion section once at construction, following the same
+     * structure as Description (header + content, added once to mainView and never
+     * removed) rather than a separate swap-to view. Three sections (Attack/Defence/Other
+     * bonuses) each laid out as a row of icon-over-value cells, matching the wiki's own
+     * Combat stats table structure as closely as reasonably fits this panel's width.
+     */
+    private JPanel buildCombatStatsSection()
+    {
+        wireAccordionHeader(combatStatsHeaderLabel, () -> "Combat Stats", () -> combatStatsExpanded,
+                () -> combatStatsHovering, hovering -> combatStatsHovering = hovering, this::toggleCombatStats);
+
+        attackBonusRow.setOpaque(false);
+        attackBonusRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        attackBonusRow2.setOpaque(false);
+        attackBonusRow2.setAlignmentX(Component.LEFT_ALIGNMENT);
+        defenceBonusRow.setOpaque(false);
+        defenceBonusRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        defenceBonusRow2.setOpaque(false);
+        defenceBonusRow2.setAlignmentX(Component.LEFT_ALIGNMENT);
+        otherBonusRow.setOpaque(false);
+        otherBonusRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcLevelsRow.setOpaque(false);
+        npcLevelsRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcLevelsRow2.setOpaque(false);
+        npcLevelsRow2.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcAttackRow.setOpaque(false);
+        npcAttackRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcAttackRow2.setOpaque(false);
+        npcAttackRow2.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcMeleeDefenceRow.setOpaque(false);
+        npcMeleeDefenceRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcMagicDefenceRow.setOpaque(false);
+        npcMagicDefenceRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        npcRangedDefenceRow.setOpaque(false);
+        npcRangedDefenceRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        combatStatsContent.setLayout(new BoxLayout(combatStatsContent, BoxLayout.Y_AXIS));
+        combatStatsContent.setOpaque(false);
+        combatStatsContent.setAlignmentX(Component.LEFT_ALIGNMENT);
+        combatStatsContent.setVisible(false);
+
+        JPanel section = new JPanel();
+        section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
+        section.setOpaque(false);
+        section.setAlignmentX(Component.LEFT_ALIGNMENT);
+        section.add(combatStatsHeaderLabel);
+        section.add(Box.createVerticalStrut(6));
+        section.add(combatStatsContent);
+
+        return section;
+    }
+
+    private JLabel makeSectionLabel(String text)
+    {
+        JLabel label = new JLabel(text);
+        label.setFont(FontManager.getRunescapeBoldFont().deriveFont(15f));
+        label.setForeground(GOLD);
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return label;
+    }
+
+    /**
+     * Populates the three bonus rows with real values and icons - called once the
+     * plugin's combat stats loader finishes fetching. Positive bonuses show in green,
+     * negative in red, zero in neutral grey, matching how the rest of this panel colors
+     * good/bad/neutral values (e.g. yesNoColor for boolean properties).
+     *
+     * @param skillIcons keyed by lowercase Skill enum name ("attack", "strength",
+     *                   "defence", "ranged", "magic", "prayer") - built by the plugin via
+     *                   skillIconManager.getSkillImage(), reusing the exact same mechanism
+     *                   already used for drop-type icons elsewhere in this plugin.
+     */
+    public void displayCombatBonuses(ItemInfoClient.CombatBonuses bonuses, Map<String, BufferedImage> skillIcons)
+    {
+        combatStatsContent.removeAll();
+        attackBonusRow.removeAll();
+        attackBonusRow2.removeAll();
+        defenceBonusRow.removeAll();
+        defenceBonusRow2.removeAll();
+        otherBonusRow.removeAll();
+
+        if (bonuses == null)
+        {
+            JLabel noCombatStatsLabel = makeSourcesInfoLabel("No combat stats available.");
+            noCombatStatsLabel.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
+            combatStatsContent.add(noCombatStatsLabel);
+        }
+        else
+        {
+            // Stab/Slash/Crush share the Attack skill icon (no unique RuneLite sprite
+            // equivalent for each melee style specifically), differentiated by their text
+            // label instead of a unique icon - see the session notes on this tradeoff.
+            attackBonusRow.add(buildBonusCell("Stab", bonuses.stabAttack, skillIcons.get("attack"), false, "Increases accuracy for stab attacks"));
+            attackBonusRow.add(buildBonusCell("Slash", bonuses.slashAttack, skillIcons.get("attack"), false, "Increases accuracy for slash attacks"));
+            attackBonusRow.add(buildBonusCell("Crush", bonuses.crushAttack, skillIcons.get("attack"), false, "Increases accuracy for crush attacks"));
+
+            attackBonusRow2.add(buildBonusCell("Magic", bonuses.magicAttack, skillIcons.get("magic"), false, "Increases accuracy for magic attacks"));
+            attackBonusRow2.add(buildBonusCell("Ranged", bonuses.rangeAttack, skillIcons.get("ranged"), false, "Increases accuracy for ranged attacks"));
+
+            defenceBonusRow.add(buildBonusCell("Stab", bonuses.stabDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by stab attacks"));
+            defenceBonusRow.add(buildBonusCell("Slash", bonuses.slashDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by slash attacks"));
+            defenceBonusRow.add(buildBonusCell("Crush", bonuses.crushDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by crush attacks"));
+
+            defenceBonusRow2.add(buildBonusCell("Magic", bonuses.magicDefence, skillIcons.get("magic"), false, "Reduces chance of being hit by magic attacks"));
+            defenceBonusRow2.add(buildBonusCell("Ranged", bonuses.rangeDefence, skillIcons.get("ranged"), false, "Reduces chance of being hit by ranged attacks"));
+
+            otherBonusRow.add(buildBonusCell("Strength", bonuses.strength, skillIcons.get("strength"), false, "Increases max hit with melee weapons"));
+            otherBonusRow.add(buildBonusCell("Ranged Str", bonuses.rangedStrength, skillIcons.get("ranged"), false, "Increases max hit with ranged weapons"));
+            otherBonusRow.add(buildBonusCell("Magic Dmg", bonuses.magicDamage, skillIcons.get("magic"), true, "Increases damage dealt by magic spells"));
+            otherBonusRow.add(buildBonusCell("Prayer", bonuses.prayer, skillIcons.get("prayer"), false, "Increases max Prayer points while worn"));
+
+            combatStatsContent.add(makeSectionLabel("Attack bonuses"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(attackBonusRow);
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(attackBonusRow2);
+            combatStatsContent.add(Box.createVerticalStrut(6));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(6));
+
+            combatStatsContent.add(makeSectionLabel("Defence bonuses"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(defenceBonusRow);
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(defenceBonusRow2);
+            combatStatsContent.add(Box.createVerticalStrut(6));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(6));
+
+            combatStatsContent.add(makeSectionLabel("Other bonuses"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(otherBonusRow);
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * NPC version of displayCombatBonuses - matches the wiki's own section structure as
+     * closely as this panel's width allows: "Combat stats" (6 base levels, including HP,
+     * which items don't have), "Aggressive stats" (6 attack-side bonuses - items call this
+     * "Attack bonuses", but the wiki's own NPC infobox specifically labels this section
+     * "Aggressive stats"), and three separate defence sections (Melee/Magic/Ranged) rather
+     * than one combined row - items combine all 5 into one "Defence bonuses" row since
+     * items only have a single value per style, but the wiki keeps these as visually
+     * distinct sections for monsters too, so this mirrors that rather than the item
+     * layout. A previous version of this only showed 5 of 6 Combat stats icons and 3 of 6
+     * Aggressive stats icons - a real gap, not just a labeling change.
+     */
+    public void displayNpcCombatStats(ItemInfoClient.NpcCombatStats stats, Map<String, BufferedImage> skillIcons)
+    {
+        combatStatsContent.removeAll();
+        npcLevelsRow.removeAll();
+        npcLevelsRow2.removeAll();
+        npcAttackRow.removeAll();
+        npcAttackRow2.removeAll();
+        npcMeleeDefenceRow.removeAll();
+        npcMagicDefenceRow.removeAll();
+        npcRangedDefenceRow.removeAll();
+
+        if (stats == null)
+        {
+            JLabel noCombatStatsLabel = makeSourcesInfoLabel("No combat stats available.");
+            noCombatStatsLabel.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
+            combatStatsContent.add(noCombatStatsLabel);
+        }
+        else
+        {
+            npcLevelsRow.add(buildLevelCell("HP", stats.hitpoints, skillIcons.get("hitpoints"), "Hitpoints - how much damage this monster can take before dying"));
+            npcLevelsRow.add(buildLevelCell("Attack", stats.attackLevel, skillIcons.get("attack"), "Attack level - affects this monster's melee accuracy"));
+            npcLevelsRow.add(buildLevelCell("Strength", stats.strengthLevel, skillIcons.get("strength"), "Strength level - affects this monster's melee max hit"));
+
+            npcLevelsRow2.add(buildLevelCell("Defence", stats.defenceLevel, skillIcons.get("defence"), "Defence level - affects how often this monster is hit"));
+            npcLevelsRow2.add(buildLevelCell("Magic", stats.magicLevel, skillIcons.get("magic"), "Magic level - affects this monster's magic accuracy and max hit"));
+            npcLevelsRow2.add(buildLevelCell("Ranged", stats.rangedLevel, skillIcons.get("ranged"), "Ranged level - affects this monster's ranged accuracy and max hit"));
+
+            npcAttackRow.add(buildBonusCell("Attack", stats.attackBonus, skillIcons.get("attack"), false, "Increases this monster's melee accuracy"));
+            npcAttackRow.add(buildBonusCell("Strength", stats.strengthBonus, skillIcons.get("strength"), false, "Increases this monster's melee max hit"));
+            npcAttackRow.add(buildBonusCell("Magic", stats.magicAttackBonus, skillIcons.get("magic"), false, "Increases this monster's magic accuracy"));
+
+            npcAttackRow2.add(buildBonusCell("Magic Dmg", stats.magicDamageBonus, skillIcons.get("magic"), true, "Increases this monster's magic max hit"));
+            npcAttackRow2.add(buildBonusCell("Ranged", stats.rangeAttackBonus, skillIcons.get("ranged"), false, "Increases this monster's ranged accuracy"));
+            npcAttackRow2.add(buildBonusCell("Ranged Str", stats.rangedStrengthBonus, skillIcons.get("ranged"), false, "Increases this monster's ranged max hit"));
+
+            npcMeleeDefenceRow.add(buildBonusCell("Stab", stats.stabDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by stab attacks"));
+            npcMeleeDefenceRow.add(buildBonusCell("Slash", stats.slashDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by slash attacks"));
+            npcMeleeDefenceRow.add(buildBonusCell("Crush", stats.crushDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by crush attacks"));
+
+            npcMagicDefenceRow.add(buildBonusCell("Magic", stats.magicDefenceBonus, skillIcons.get("magic"), false, "Reduces chance of being hit by magic attacks"));
+
+            String weaknessLabel = (stats.elementalWeaknessType == null || stats.elementalWeaknessType.trim().isEmpty())
+                    ? "No Weakness"
+                    : stats.elementalWeaknessType.trim().substring(0, 1).toUpperCase()
+                      + stats.elementalWeaknessType.trim().substring(1).toLowerCase() + " Weakness";
+            npcMagicDefenceRow.add(buildBonusCell(weaknessLabel, stats.elementalWeaknessPercent, skillIcons.get("elemental_weakness"), true, "Extra damage taken from this element's spells"));
+
+            npcRangedDefenceRow.add(buildBonusCell("Light", stats.lightRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by darts and similar light ammo"));
+            npcRangedDefenceRow.add(buildBonusCell("Standard", stats.standardRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by arrows and similar standard ammo"));
+            npcRangedDefenceRow.add(buildBonusCell("Heavy", stats.heavyRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by bolts and similar heavy ammo"));
+
+            combatStatsContent.add(makeSectionLabel("Combat stats"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcLevelsRow);
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcLevelsRow2);
+            combatStatsContent.add(Box.createVerticalStrut(6));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(6));
+
+            combatStatsContent.add(makeSectionLabel("Aggressive stats"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcAttackRow);
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcAttackRow2);
+            combatStatsContent.add(Box.createVerticalStrut(6));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(6));
+
+            combatStatsContent.add(makeSectionLabel("Melee defence"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcMeleeDefenceRow);
+            combatStatsContent.add(Box.createVerticalStrut(6));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(6));
+
+            combatStatsContent.add(makeSectionLabel("Magic defence"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcMagicDefenceRow);
+            combatStatsContent.add(Box.createVerticalStrut(6));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(6));
+
+            combatStatsContent.add(makeSectionLabel("Ranged defence"));
+            combatStatsContent.add(Box.createVerticalStrut(4));
+            combatStatsContent.add(npcRangedDefenceRow);
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * Small icon+text row under Magic defence showing the monster's elemental weakness -
+     * matches the wiki's own placement of this info right alongside Magic defence, rather
+     * than as its own separate section, and now also matches its icon+text presentation
+     * (a rune icon, or "Pure essence" for no weakness) rather than plain text alone.
+     * "No elemental weakness" when stats.elementalWeaknessType is null/empty, otherwise
+     * "Weak to X spells (+Y%)". The icon itself is resolved by the plugin via
+     * itemManager.search (see setupNpcCombatStats) and passed in through skillIcons under
+     * the "elemental_weakness" key, same mechanism as every other icon in this panel.
+     */
+    private JPanel buildBonusCell(String label, int value, BufferedImage icon)
+    {
+        return buildBonusCell(label, value, icon, false, null);
+    }
+
+    /**
+     * Like buildBonusCell, but for plain base levels (the wiki's "Combat stats" section -
+     * HP/Attack/Strength/Defence/Magic/Ranged) rather than bonuses - no "+" prefix and
+     * always neutral coloring, since a level of 5 isn't a "good" or "bad" value the way a
+     * +5 bonus is.
+     */
+    private JPanel buildLevelCell(String label, int value, BufferedImage icon, String tooltipText)
+    {
+        JPanel cell = new JPanel();
+        cell.setLayout(new BoxLayout(cell, BoxLayout.Y_AXIS));
+        cell.setOpaque(false);
+        cell.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JLabel iconLabel = new JLabel();
+        iconLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        if (icon != null)
+        {
+            final int iconSize = 24;
+            Image scaled = icon.getScaledInstance(iconSize, iconSize, Image.SCALE_SMOOTH);
+            iconLabel.setIcon(new ImageIcon(scaled));
+        }
+
+        JLabel valueLabel = new JLabel(String.valueOf(value));
+        valueLabel.setFont(FontManager.getRunescapeBoldFont().deriveFont(16f));
+        valueLabel.setForeground(NEUTRAL);
+        valueLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        Font nameFont = new Font("Segoe UI", Font.PLAIN, 11);
+        JLabel nameLabel = new JLabel("<html><div style='text-align:center;'>"
+                + wrapTextManually(label, 58, nameFont) + "</div></html>");
+        nameLabel.setFont(nameFont);
+        nameLabel.setForeground(NEUTRAL);
+        nameLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        nameLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        nameLabel.setVerticalAlignment(SwingConstants.TOP);
+        // Same reserved-2-line-height alignment fix as buildBonusCell, so this row's cells
+        // line up visually with the bonus rows above/below it.
+        FontMetrics nameMetrics = getFontMetrics(nameFont);
+        int twoLineHeight = nameMetrics.getHeight() * 2;
+        nameLabel.setPreferredSize(new Dimension(58, twoLineHeight));
+        nameLabel.setMinimumSize(new Dimension(58, twoLineHeight));
+        nameLabel.setMaximumSize(new Dimension(Integer.MAX_VALUE, twoLineHeight));
+
+        // Set on every sub-component, not just the cell itself - a JLabel child can
+        // otherwise intercept the mouse and show no tooltip at all rather than the
+        // parent's, depending on exactly where within the cell the cursor is.
+        if (showTooltips && tooltipText != null)
+        {
+            cell.setToolTipText(tooltipText);
+            iconLabel.setToolTipText(tooltipText);
+            valueLabel.setToolTipText(tooltipText);
+            nameLabel.setToolTipText(tooltipText);
+        }
+
+        cell.add(iconLabel);
+        cell.add(Box.createVerticalStrut(2));
+        cell.add(valueLabel);
+        cell.add(Box.createVerticalStrut(1));
+        cell.add(nameLabel);
+        return cell;
+    }
+
+    private JPanel buildBonusCell(String label, int value, BufferedImage icon, boolean isPercentage)
+    {
+        return buildBonusCell(label, value, icon, isPercentage, null);
+    }
+
+    private JPanel buildBonusCell(String label, int value, BufferedImage icon, boolean isPercentage, String tooltipText)
+    {
+        JPanel cell = new JPanel();
+        cell.setLayout(new BoxLayout(cell, BoxLayout.Y_AXIS));
+        cell.setOpaque(false);
+        cell.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JLabel iconLabel = new JLabel();
+        iconLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        if (icon != null)
+        {
+            final int iconSize = 24;
+            Image scaled = icon.getScaledInstance(iconSize, iconSize, Image.SCALE_SMOOTH);
+            iconLabel.setIcon(new ImageIcon(scaled));
+        }
+
+        JLabel valueLabel = new JLabel((value > 0 ? "+" : "") + value + (isPercentage ? "%" : ""));
+        valueLabel.setFont(FontManager.getRunescapeBoldFont().deriveFont(16f));
+        valueLabel.setForeground(value > 0 ? RARITY_COMMON : (value < 0 ? RARITY_RARE : NEUTRAL));
+        valueLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        Font nameFont = new Font("Segoe UI", Font.PLAIN, 11);
+        JLabel nameLabel = new JLabel("<html><div style='text-align:center;'>"
+                + wrapTextManually(label, 58, nameFont) + "</div></html>");
+        nameLabel.setFont(nameFont);
+        nameLabel.setForeground(NEUTRAL);
+        nameLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+        nameLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        nameLabel.setVerticalAlignment(SwingConstants.TOP);
+        // Reserves room for 2 lines always, regardless of whether this particular label
+        // actually needs 1 or 2 lines - without this, a cell with a short single-line
+        // label (e.g. "Strength") ends up shorter overall than one with a wrapped
+        // two-line label (e.g. "Magic Dmg"), and centering each cell's content
+        // independently (an earlier, wrong fix) shifted icons out of alignment with each
+        // other instead of fixing it. A uniform reserved height keeps every cell's
+        // internal structure identical, so icon+value naturally align across the row.
+        FontMetrics nameMetrics = getFontMetrics(nameFont);
+        int twoLineHeight = nameMetrics.getHeight() * 2;
+        nameLabel.setPreferredSize(new Dimension(58, twoLineHeight));
+        nameLabel.setMinimumSize(new Dimension(58, twoLineHeight));
+        nameLabel.setMaximumSize(new Dimension(Integer.MAX_VALUE, twoLineHeight));
+
+        if (showTooltips && tooltipText != null)
+        {
+            cell.setToolTipText(tooltipText);
+            iconLabel.setToolTipText(tooltipText);
+            valueLabel.setToolTipText(tooltipText);
+            nameLabel.setToolTipText(tooltipText);
+        }
+
+        cell.add(iconLabel);
+        cell.add(Box.createVerticalStrut(2));
+        cell.add(valueLabel);
+        cell.add(Box.createVerticalStrut(1));
+        cell.add(nameLabel);
+        return cell;
+    }
+
+    /**
      * A thin horizontal rule used to separate accordion sections, matching the reference
      * style's divider lines instead of wrapping each section in its own bordered card.
      */
@@ -580,7 +1178,7 @@ public class ItemInfoPanel extends PluginPanel
      */
     private JPanel buildItemSourcesSection()
     {
-        wireAccordionHeader(itemSourcesHeaderLabel, () -> npcDropsMode ? "Drops" : "Item sources", () -> itemSourcesExpanded,
+        wireAccordionHeader(itemSourcesHeaderLabel, () -> npcDropsMode ? singleSectionLabel : "Item sources", () -> itemSourcesExpanded,
                 () -> itemSourcesHovering, hovering -> itemSourcesHovering = hovering, this::toggleItemSources);
 
         wireAccordionHeader(dropsHeaderLabel, () -> "Drops", () -> dropsExpanded,
@@ -751,8 +1349,13 @@ public class ItemInfoPanel extends PluginPanel
         g.fill(frameShape);
 
         g.setColor(new Color(255, 255, 255, 120));
-        g.setFont(FontManager.getRunescapeFont().deriveFont(16f));
-        g.drawString("...", 14, 38);
+        Font dotsFont = FontManager.getRunescapeFont().deriveFont(16f);
+        g.setFont(dotsFont);
+        FontMetrics dotsMetrics = g.getFontMetrics(dotsFont);
+        String dots = "...";
+        int dotsX = (boxSize - dotsMetrics.stringWidth(dots)) / 2;
+        int dotsY = (boxSize - dotsMetrics.getHeight()) / 2 + dotsMetrics.getAscent();
+        g.drawString(dots, dotsX, dotsY);
 
         g.setColor(new Color(255, 255, 255, 55));
         g.setStroke(new BasicStroke(1.2f));
@@ -769,19 +1372,19 @@ public class ItemInfoPanel extends PluginPanel
     }
 
     /**
+     * Sanity ceiling for a single shop-sold price. No item in OSRS is legitimately sold by
+     * a shop for anywhere near this much - anything above it is essentially certain to be
+     * a wiki data error (one was found: "Tree (Draynor guard)" showing 10,000,000,000 gp
+     * for Stew, when every other shop sells it for 20-24 gp) rather than a real price.
+     */
+    private static final long SHOP_PRICE_SANITY_CAP = 1_000_000_000L;
+
+    /**
      * Adds comma thousand-separators to a shop price string (e.g. "750" -> "750",
      * "2500" -> "2,500"). Falls back to the raw string unchanged if it isn't a plain
      * integer (the wiki's price fields are usually clean numbers, but this avoids crashing
      * or mangling anything unexpected).
      */
-    /**
-     * Sanity ceiling for a single shop-sold price. No item in OSRS is legitimately sold by
-     * a shop for anywhere near this much - anything above it is essentially certain to be
-     * a wiki data error (a real one was found: "Tree (Draynor guard)" showing 10,000,000,000
-     * gp for Stew, when every other shop sells it for 20-24 gp) rather than a real price.
-     */
-    private static final long SHOP_PRICE_SANITY_CAP = 1_000_000_000L;
-
     private String formatShopPrice(String rawPrice)
     {
         try
@@ -1164,10 +1767,24 @@ public class ItemInfoPanel extends PluginPanel
         addTableRow(row, label, value, null, null);
     }
 
+    /**
+     * Scales the header name label's font down for longer names, so it fits within the
+     * fixed 110px wrap width without overflowing even after wrapping - "Thermonuclear
+     * smoke devil" (25 characters) still didn't fit cleanly at the previous fixed 20f
+     * size. Thresholds are a starting point based on character count, not a precise
+     * pixel-width measurement, so may still need adjustment for other long names.
+     */
+    private Font headerNameFont(String name)
+    {
+        int length = name != null ? name.length() : 0;
+        float size = length > 30 ? 10f : length > 24 ? 12f : length > 18 ? 16f : 20f;
+        return FontManager.getRunescapeBoldFont().deriveFont(size);
+    }
+
     public void showItem(String name, BufferedImage image, int price, int highAlch, int lowAlch)
     {
         ensureItemViewShown();
-        nameLabel.setText("<html>" + wrapTextManually(name, 110, FontManager.getRunescapeBoldFont().deriveFont(20f)) + "</html>");
+        nameLabel.setText("<html>" + wrapTextManually(name, 140, headerNameFont(name)) + "</html>");
         if (image != null)
         {
             setImage(image);
@@ -1408,17 +2025,25 @@ public class ItemInfoPanel extends PluginPanel
     }
 
     /**
-     * Switches between the normal item behaviour (outer "Item sources" accordion with
-     * nested "Drops"/"Shops" toggles inside it) and NPC mode (the outer accordion relabels
-     * to "Drops" directly, and the now-redundant nested "Drops" toggle is hidden entirely -
-     * one click shows the list instead of two). Call with false to restore normal behaviour
-     * (e.g. switching from an NPC back to examining an item).
+     * Convenience overload defaulting to "Drops" - used for the normal NPC case.
      */
     public void setNpcDropsMode(boolean npcMode)
     {
+        setNpcDropsMode(npcMode, "Drops");
+    }
+
+    /**
+     * @param label the outer accordion's text when npcMode is true - "Drops" for an NPC's
+     *              own drop table, "Rewards" for a reward casket's contents. Ignored when
+     *              npcMode is false (the outer accordion is "Item sources" in that case
+     *              regardless).
+     */
+    public void setNpcDropsMode(boolean npcMode, String label)
+    {
         this.npcDropsMode = npcMode;
+        this.singleSectionLabel = label;
         dropsHeaderLabel.setVisible(!npcMode);
-        updateAccordionHeader(itemSourcesHeaderLabel, npcMode ? "Drops" : "Item sources", itemSourcesExpanded, itemSourcesHovering);
+        updateAccordionHeader(itemSourcesHeaderLabel, npcMode ? singleSectionLabel : "Item sources", itemSourcesExpanded, itemSourcesHovering);
         dropsScrollPane.setVisible(npcMode ? itemSourcesExpanded : (itemSourcesExpanded && dropsExpanded));
         revalidate();
         repaint();
@@ -1429,7 +2054,7 @@ public class ItemInfoPanel extends PluginPanel
      * itself has no access to game/client resources needed to actually resolve and display
      * the clicked item/NPC, so this is wired up once by the plugin at startup.
      */
-    public void setDropRowClickListener(Consumer<String> listener)
+    public void setDropRowClickListener(BiConsumer<String, String> listener)
     {
         this.dropRowClickListener = listener;
     }
@@ -1449,23 +2074,6 @@ public class ItemInfoPanel extends PluginPanel
         backButtonLabel.setVisible(visible);
         revalidate();
         repaint();
-    }
-
-    /**
-     * Strips a sub-location suffix like " (Wilderness Slayer Cave)" before using a clicked
-     * name for navigation - but only when viewing an item's own drops (where that suffix
-     * was artificially added by formatSourceName for monster names). When viewing an NPC's
-     * drops (item names), a parenthetical suffix can be part of the item's real, distinct
-     * wiki page name (e.g. "Ring of wealth (5)"), so nothing is stripped in that direction.
-     */
-    private String stripSubLocationForNav(String name)
-    {
-        if (npcDropsMode)
-        {
-            return name;
-        }
-        int idx = name.indexOf(" (");
-        return idx > 0 ? name.substring(0, idx) : name;
     }
 
     /**
@@ -1489,6 +2097,19 @@ public class ItemInfoPanel extends PluginPanel
     }
 
     /**
+     * Controls whether stat cells in the Combat Stats section get a hover tooltip
+     * explaining what that stat means. Set once by the plugin at startup, and again
+     * whenever the user changes the "Tooltips" config option live via onConfigChanged.
+     * Tooltip text is applied once, at cell-build time in buildBonusCell/buildLevelCell,
+     * so a live config change takes effect on the next item/NPC looked up - it doesn't
+     * retroactively add or remove tooltips from whatever's already displayed.
+     */
+    public void setShowTooltips(boolean showTooltips)
+    {
+        this.showTooltips = showTooltips;
+    }
+
+    /**
      * Called once by the plugin at startup with the real coins item sprite (item 995).
      * Scaled down to match the other property-row icons.
      */
@@ -1503,8 +2124,8 @@ public class ItemInfoPanel extends PluginPanel
 
     /**
      * Called once by the plugin at startup with the bundled max-hit hitsplat icon (a real
-     * cropped screenshot, not a fetched sprite - there was no confirmed-safe sprite
-     * constant for a standard damage hitsplat to fetch instead).
+     * cropped screenshot, not a fetched sprite - there was no safe sprite constant for a
+     * standard damage hitsplat to fetch instead).
      */
     public void setMaxHitIcon(BufferedImage image)
     {
@@ -1906,7 +2527,7 @@ public class ItemInfoPanel extends PluginPanel
     private void toggleItemSources()
     {
         itemSourcesExpanded = !itemSourcesExpanded;
-        updateAccordionHeader(itemSourcesHeaderLabel, npcDropsMode ? "Drops" : "Item sources", itemSourcesExpanded, itemSourcesHovering);
+        updateAccordionHeader(itemSourcesHeaderLabel, npcDropsMode ? singleSectionLabel : "Item sources", itemSourcesExpanded, itemSourcesHovering);
         itemSourcesContent.setVisible(itemSourcesExpanded);
 
         if (npcDropsMode)
@@ -2080,11 +2701,13 @@ public class ItemInfoPanel extends PluginPanel
         dropsContent.removeAll();
         if (cachedDrops.isEmpty())
         {
-            // NPCs get a more specific message than items, since in NPC mode this section
-            // IS the drops list (there's no separate Shops to fall back to) - "no known
-            // drop sources" reads oddly for a monster, "no drop data available" is clearer.
+            // Generalized from an NPC-specific message to use singleSectionLabel, so this
+            // reads naturally for any single-source case, not just NPCs - "No known drop
+            // sources" (the two-level Item Sources > Drops/Shops phrasing) reads oddly
+            // here since in this mode the section IS the one list, with no separate Shops
+            // to fall back to.
             String emptyMessage = npcDropsMode
-                    ? "No drop data available for this NPC."
+                    ? "No " + singleSectionLabel.toLowerCase() + " available."
                     : "No known drop sources.";
             dropsContent.add(makeSourcesInfoLabel(emptyMessage));
         }
@@ -2216,7 +2839,7 @@ public class ItemInfoPanel extends PluginPanel
                 @Override
                 public void mousePressed(MouseEvent e)
                 {
-                    dropRowClickListener.accept(stripSubLocationForNav(rawName));
+                    dropRowClickListener.accept(rawName, drop.level);
                 }
 
                 @Override
@@ -2305,7 +2928,30 @@ public class ItemInfoPanel extends PluginPanel
         {
             return "-";
         }
-        return rawQuantity.replace("\u2013", "-").replace("\u2014", "-");
+        String normalized = rawQuantity.replace("\u2013", "-").replace("\u2014", "-");
+
+        // Quantities can be a single number ("2500") or a range ("1000-5000") - format
+        // each numeric part with comma separators individually, rejoining with "-",
+        // rather than trying to parse the whole string as one number.
+        String[] parts = normalized.split("-");
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < parts.length; i++)
+        {
+            if (i > 0)
+            {
+                result.append("-");
+            }
+            String part = parts[i].trim();
+            try
+            {
+                result.append(String.format("%,d", Integer.parseInt(part)));
+            }
+            catch (NumberFormatException e)
+            {
+                result.append(part);
+            }
+        }
+        return result.toString();
     }
 
     // Exact anchor points from the wiki's own "Combat level" page ("Displayed colours"
@@ -2440,9 +3086,9 @@ public class ItemInfoPanel extends PluginPanel
         {
             // A single space-delimited "word" can itself be wider than the whole
             // available line (e.g. a drop rate like "1/6,729.23" has no spaces inside it
-            // to wrap at) - confirmed via a real screenshot where these were overflowing
-            // straight past the panel edge instead of wrapping. Break it character-by-
-            // character in that case, rather than relying on space-splitting alone.
+            // to wrap at) - these were overflowing straight past the panel edge instead
+            // of wrapping. Break it character-by-character in that case, rather than
+            // relying on space-splitting alone.
             if (metrics.stringWidth(word) > maxWidthPx)
             {
                 if (currentLine.length() > 0)
@@ -2662,9 +3308,9 @@ public class ItemInfoPanel extends PluginPanel
         }
 
         // Pull the effective odds out of fraction strings like "3/128", "1/9.846", or
-        // "5/128; 1/8,192" (real drop data confirmed via a live API response) - dividing
-        // denominator by numerator normalizes "3/128" to the same "1-in-N" scale as "1/N"
-        // so a 3/128 drop and a roughly-equivalent 1/43 drop grade to the same colour band.
+        // "5/128; 1/8,192" - dividing denominator by numerator normalizes "3/128" to the
+        // same "1-in-N" scale as "1/N" so a 3/128 drop and a roughly-equivalent 1/43 drop
+        // grade to the same colour band.
         Matcher matcher = Pattern.compile("([0-9,.]+)/([0-9,.]+)").matcher(rarity);
         Double bestOdds = null;
         while (matcher.find())
@@ -2737,7 +3383,7 @@ public class ItemInfoPanel extends PluginPanel
     public void showNonItem(String name)
     {
         ensureItemViewShown();
-        nameLabel.setText("<html>" + wrapTextManually(name, 110, FontManager.getRunescapeBoldFont().deriveFont(20f)) + "</html>");
+        nameLabel.setText("<html>" + wrapTextManually(name, 140, headerNameFont(name)) + "</html>");
         showLoadingImage();
         infoTable.removeAll();
         updatePropertiesVisibility();
@@ -2832,15 +3478,24 @@ public class ItemInfoPanel extends PluginPanel
         int origWidth = image.getWidth();
         int origHeight = image.getHeight();
 
-        double scale = Math.min((double) boxSize / origWidth, (double) boxSize / origHeight);
+        // Capped at 1.5x - unrestricted upscaling of these small pixel-art sprites was
+        // what caused the pixelated look, but a hard 1.0x cap (no upscale at all) made
+        // them look too small in the box. 1.5x is a middle ground: still noticeably
+        // sharper than stretching all the way to fill 60px, without looking tiny.
+        double scale = Math.min(1.5, Math.min((double) boxSize / origWidth, (double) boxSize / origHeight));
         int scaledWidth = Math.max(1, (int) (origWidth * scale));
         int scaledHeight = Math.max(1, (int) (origHeight * scale));
-
-        Image scaledImage = image.getScaledInstance(scaledWidth, scaledHeight, Image.SCALE_SMOOTH);
 
         BufferedImage canvas = new BufferedImage(boxSize, boxSize, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = canvas.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        // Bicubic interpolation for the image itself - drawing the original image
+        // directly at the target size (rather than pre-scaling via the older
+        // getScaledInstance() API first) avoids both a pixelated result and a subtle
+        // centering mismatch that could happen when that API's returned image didn't
+        // perfectly match the requested dimensions.
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
 
         RoundRectangle2D frameShape = new RoundRectangle2D.Float(0.5f, 0.5f, boxSize - 1, boxSize - 1, 10, 10);
 
@@ -2853,7 +3508,7 @@ public class ItemInfoPanel extends PluginPanel
         g.setClip(frameShape);
         int x = (boxSize - scaledWidth) / 2;
         int y = (boxSize - scaledHeight) / 2;
-        g.drawImage(scaledImage, x, y, null);
+        g.drawImage(image, x, y, scaledWidth, scaledHeight, null);
         g.setClip(null);
 
         // Soft border on top to finish the frame.
@@ -2865,5 +3520,46 @@ public class ItemInfoPanel extends PluginPanel
 
         iconLabel.setIcon(new ImageIcon(canvas));
         scrollToTop();
+    }
+
+    /**
+     * A simple rounded-rectangle outline border - Swing's built-in
+     * BorderFactory.createMatteBorder/createLineBorder only draw sharp, square corners,
+     * with no built-in option for rounded ones. Used for the "Report Issues or Support the
+     * Developer" row specifically, at the user's request for a softer look than the
+     * previous sharp-cornered box.
+     */
+    private static class RoundedLineBorder implements Border
+    {
+        private final Color color;
+        private final int radius;
+
+        RoundedLineBorder(Color color, int radius)
+        {
+            this.color = color;
+            this.radius = radius;
+        }
+
+        @Override
+        public void paintBorder(Component c, Graphics g, int x, int y, int width, int height)
+        {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setColor(color);
+            g2.draw(new RoundRectangle2D.Float(x, y, width - 1, height - 1, radius, radius));
+            g2.dispose();
+        }
+
+        @Override
+        public Insets getBorderInsets(Component c)
+        {
+            return new Insets(1, 1, 1, 1);
+        }
+
+        @Override
+        public boolean isBorderOpaque()
+        {
+            return false;
+        }
     }
 }

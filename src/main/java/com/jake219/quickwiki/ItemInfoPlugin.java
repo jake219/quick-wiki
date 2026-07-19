@@ -2,23 +2,30 @@ package com.jake219.quickwiki;
 
 import javax.inject.Inject;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import com.google.inject.Provides;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.MenuAction;
+import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
 import net.runelite.api.Skill;
 import net.runelite.api.SpriteID;
 import net.runelite.api.events.MenuEntryAdded;
+import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.input.KeyManager;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
@@ -30,6 +37,8 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 
 import javax.swing.SwingUtilities;
+import java.awt.event.KeyEvent;
+import net.runelite.client.input.KeyListener;
 import java.awt.image.BufferedImage;
 
 @Slf4j
@@ -61,8 +70,72 @@ public class ItemInfoPlugin extends Plugin
     @Inject
     private SpriteManager spriteManager;
 
+    @Inject
+    private ItemInfoConfig config;
+
+    @Inject
+    private KeyManager keyManager;
+
+    @Provides
+    ItemInfoConfig provideConfig(ConfigManager configManager)
+    {
+        return configManager.getConfig(ItemInfoConfig.class);
+    }
+
     private ItemInfoPanel panel;
     private NavigationButton navButton;
+
+    /**
+     * Tracks whether Ctrl is currently held down - checked in onMenuEntryAdded, both to
+     * decide whether to add the "Wiki" entry at all, and to reorder it to the front of the
+     * menu array (RuneLite's default left-click action) immediately after adding it.
+     */
+    private volatile boolean hotkeyHeld = false;
+
+    /**
+     * Tracks the most recent "Examine" target seen in onMenuEntryAdded, tagged with the
+     * game tick it was seen on. Exists specifically for examine-only objects (decorative
+     * scenery with no other interactions) - holding the hotkey and clicking one used to
+     * do nothing, because the object has no real interactive menu entry to fall back to:
+     * the actual default left-click action for these is a plain "Walk here" tile click
+     * (actionName=WALK), not GAME_OBJECT_* or EXAMINE_OBJECT the way objects with real
+     * options produce. Since menu entries are rebuilt every tick based on current hover,
+     * an Examine entry for the object under the cursor fires on the same tick as the
+     * click that follows it - so onMenuOptionClicked can treat a WALK click as "clicked
+     * this object" if (and only if) this record is from the current tick, avoiding
+     * hijacking an unrelated plain walk-to-empty-ground click using stale hover data.
+     */
+    private String lastExamineCategory;
+    private String lastExamineName;
+    private int lastExamineMenuIdentifier;
+    private int lastExamineItemId;
+    private int lastExamineTick = -1;
+
+    private final KeyListener hotkeyListener = new KeyListener()
+    {
+        @Override
+        public void keyTyped(KeyEvent e)
+        {
+        }
+
+        @Override
+        public void keyPressed(KeyEvent e)
+        {
+            if (config.enableHotkey() && config.hotkey().matches(e))
+            {
+                hotkeyHeld = true;
+            }
+        }
+
+        @Override
+        public void keyReleased(KeyEvent e)
+        {
+            if (config.hotkey().matches(e))
+            {
+                hotkeyHeld = false;
+            }
+        }
+    };
 
     /**
      * Tracks the ORIGINAL item/NPC/object the user right-clicked "Wiki" on, so the back
@@ -124,7 +197,7 @@ public class ItemInfoPlugin extends Plugin
                 showItemByName(originalPageName, originalGameId, false);
                 break;
             case "NPC":
-                showNpcByName(originalPageName, originalGameId, false);
+                showNpcByName(originalPageName, originalGameId, false, -1);
                 break;
             case "OBJECT":
                 showObjectByName(originalPageName, originalGameId, false);
@@ -140,7 +213,10 @@ public class ItemInfoPlugin extends Plugin
     @Override
     protected void startUp()
     {
+        keyManager.registerKeyListener(hotkeyListener);
+
         panel = new ItemInfoPanel();
+        panel.setShowTooltips(config.showTooltips());
 
         final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/com/jake219/quickwiki/icon.png");
 
@@ -158,7 +234,7 @@ public class ItemInfoPlugin extends Plugin
         // same as if it had been examined directly. The panel only knows the clicked name
         // and which mode it was in when clicked; the actual resolve-and-display logic needs
         // client/item-manager access the panel doesn't have, so it lives here.
-        panel.setDropRowClickListener(clickedName ->
+        panel.setDropRowClickListener((clickedName, levelStr) ->
         {
             if (panel.isNpcDropsMode())
             {
@@ -166,23 +242,68 @@ public class ItemInfoPlugin extends Plugin
             }
             else
             {
-                showNpcByName(clickedName, -1, true);
+                // Some "sources" in an item's own drop table are themselves items, not
+                // monsters - Reward caskets, Mystery box, and similar containers are
+                // tracked in the same dropsline bucket as actual monsters. Checking
+                // whether the name resolves as a real item first - rather than
+                // hardcoding a list of known container names, which would inevitably
+                // miss some - handles this whole category generally.
+                itemInfoClient.resolveExactItemIdStrict(clickedName, resolvedItemId ->
+                {
+                    if (resolvedItemId != null)
+                    {
+                        showItemByName(clickedName, resolvedItemId, true);
+                        return;
+                    }
+
+                    // Some sources are world objects/scenery rather than items or
+                    // monsters - e.g. "Chest (Tombs of Amascut)" for raid uniques.
+                    // Checked before falling back to NPC, same reasoning as the item
+                    // check above: without this, an object source falls through to an
+                    // NPC search that doesn't match anything real.
+                    itemInfoClient.resolveExactObjectIdStrict(clickedName, resolvedObjectId ->
+                    {
+                        if (resolvedObjectId != null)
+                        {
+                            showObjectByName(clickedName, resolvedObjectId, true);
+                            return;
+                        }
+
+                        int combatLevel = -1;
+                        try
+                        {
+                            if (levelStr != null && !levelStr.trim().isEmpty())
+                            {
+                                combatLevel = Integer.parseInt(levelStr.trim());
+                            }
+                        }
+                        catch (NumberFormatException e)
+                        {
+                            // Some drop rows' "level" field isn't a plain number (e.g.
+                            // "-" for a universal drop with no level restriction) -
+                            // fall back to -1 (unknown).
+                        }
+                        // Only strip a sub-location suffix (e.g. "Cyclops (Warriors'
+                        // Guild Basement)" -> "Cyclops") now that the raw, unstripped
+                        // name has already been tried as a real item and object and
+                        // failed both - stripping earlier would cut "Reward casket
+                        // (hard)" down to just "Reward casket", which isn't a real,
+                        // resolvable item on its own.
+                        showNpcByName(stripSubLocationForNav(clickedName), -1, true, combatLevel);
+                    });
+                });
             }
         });
         panel.setBackButtonListener(this::goBack);
 
-        // Bundled resource, not fetched at runtime - loads instantly and reliably, same as
-        // the nav icon above, which is why this replaced the earlier itemManager.getImage()
-        // approach: that was an async fetch with a real timing race (it could show the
-        // hand-drawn fallback for the first item or two examined right after the plugin
-        // loads, before the fetch completed). A bundled image has no such window.
+        // Bundled resource, not fetched at runtime - loads instantly and reliably, unlike
+        // an async itemManager.getImage() fetch which could show the hand-drawn fallback
+        // for the first item or two examined right after the plugin loads.
         final BufferedImage geIcon = ImageUtil.loadImageResource(getClass(), "/com/jake219/quickwiki/ge_icon.png");
         panel.setCoinIcon(geIcon);
 
         // Same bundled-resource approach as the GE icon above - these three didn't have a
-        // confirmed, safe sprite constant to fetch instead (a "standard damage" hitsplat
-        // sprite ID couldn't be verified to actually exist, and guessing one risks a build
-        // that doesn't compile), so real cropped screenshots are used instead.
+        // safe sprite constant to fetch instead, so real cropped screenshots are used.
         final BufferedImage maxHitIcon = ImageUtil.loadImageResource(getClass(), "/com/jake219/quickwiki/maxhit_icon.png");
         panel.setMaxHitIcon(maxHitIcon);
         final BufferedImage poisonIcon = ImageUtil.loadImageResource(getClass(), "/com/jake219/quickwiki/poison_icon.png");
@@ -227,10 +348,24 @@ public class ItemInfoPlugin extends Plugin
     @Override
     protected void shutDown()
     {
+        keyManager.unregisterKeyListener(hotkeyListener);
         clientToolbar.removeNavigation(navButton);
     }
 
-
+    /**
+     * Keeps the panel's tooltip setting in sync when the user changes it live in the
+     * plugin's config panel, rather than requiring a client restart for it to take
+     * effect. Only affects the "Tooltips" option here, but checks the group/key so this
+     * doesn't fire needless work for unrelated config changes from other plugins.
+     */
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event)
+    {
+        if ("quickwiki".equals(event.getGroup()) && "showTooltips".equals(event.getKey()))
+        {
+            panel.setShowTooltips(config.showTooltips());
+        }
+    }
 
     @Subscribe
     public void onMenuEntryAdded(MenuEntryAdded event)
@@ -260,6 +395,24 @@ public class ItemInfoPlugin extends Plugin
             return;
         }
 
+        if (config.enableHotkey() && hotkeyHeld)
+        {
+
+            lastExamineCategory = category;
+            lastExamineName = event.getTarget().replaceAll("<[^>]*>", "");
+            lastExamineMenuIdentifier = event.getIdentifier();
+            lastExamineItemId = event.getItemId();
+            lastExamineTick = client.getTickCount();
+        }
+
+        // When hotkey mode is on, "Wiki" is only added to the menu while Ctrl is actively
+        // held - during normal use it's skipped entirely, per the original Reddit request
+        // to remove menu clutter once a hotkey exists as an alternative.
+        if (config.enableHotkey() && !hotkeyHeld)
+        {
+            return;
+        }
+
         final String cleanName = event.getTarget().replaceAll("<[^>]*>", "");
         final int menuIdentifier = event.getIdentifier();
         final int itemId = event.getItemId();
@@ -269,47 +422,241 @@ public class ItemInfoPlugin extends Plugin
                 .setTarget(event.getTarget())
                 .setType(MenuAction.RUNELITE)
                 .onClick(e -> clientThread.invoke(() -> handleWikiClick(category, cleanName, menuIdentifier, itemId)));
+
+        // Reordering happens right here, immediately after adding our entry, rather than
+        // in a separate MenuOpened subscriber - MenuOpened only fires when a menu is
+        // actually visually opened via right-click, not for a plain left-click, which
+        // never shows a popup and just directly executes whatever's last in the array.
+        // Doing it here means the array is already in its final default-action order by
+        // the time any click happens, regardless of whether MenuOpened ever fires.
+        if (config.enableHotkey() && hotkeyHeld)
+        {
+            MenuEntry[] entries = client.getMenuEntries();
+            MenuEntry[] reordered = new MenuEntry[entries.length];
+            System.arraycopy(entries, 0, reordered, 0, entries.length);
+            for (int i = 0; i < reordered.length - 1; i++)
+            {
+                if ("Wiki".equals(reordered[i].getOption()) && reordered[i].getType() == MenuAction.RUNELITE)
+                {
+                    MenuEntry wikiEntry = reordered[i];
+                    System.arraycopy(reordered, i + 1, reordered, i, reordered.length - i - 1);
+                    reordered[reordered.length - 1] = wikiEntry;
+                    break;
+                }
+            }
+            client.setMenuEntries(reordered);
+        }
     }
 
     /**
-     * Resolves the precise in-game ID for the thing that was actually clicked, so we can
-     * do an exact wiki lookup instead of guessing from the (often ambiguous) display name.
+     * Fallback safety net for hotkey mode - the primary mechanism above (add a "Wiki"
+     * entry, reorder it to the end of the array) can be raced by another plugin adding its
+     * own entry afterward on the same tick, which would push "Wiki" back out of the
+     * default-action position before the actual click happens.
      * <p>
-     * For NPCs, the menu identifier is the NPC's index in the world's NPC list, not its
-     * composition ID - so we look the NPC up by index to get its real ID. For objects, the
-     * menu identifier is already the object's ID directly.
-     *
-     * @return the resolved game ID, or -1 if it couldn't be determined
+     * This catches whatever actually got left-clicked instead (which may not be "Wiki" if
+     * the reorder got undone) and, if the hotkey is held and it's a real item/NPC/object
+     * interaction, redirects it to Quick Wiki instead of letting the original action
+     * happen. Matches by MenuAction name prefix rather than an exhaustive enum list, since
+     * the actual default action varies a lot by target (Walk here, Attack, Talk-to, Take,
+     * Use, etc.).
      */
-    /**
-     * Maps the wiki's "Drop type" field (e.g. "mining", "hunter", "fishing") to the
-     * matching RuneLite {@link Skill} and returns its real game icon, for skilling-type
-     * item sources where a bare level number doesn't mean much without knowing which
-     * skill it's for (e.g. a Coal rock's "level 30" is a Mining level). Returns null for
-     * "combat", "reward", or anything else that isn't an actual skill name.
-     */
-    /**
-     * Resolves and fetches an icon for every unique item name in an NPC's drop list, then
-     * displays the drops with those icons attached. Deduped by name first since a drop
-     * table can list the same item many times at different quantities/rarities (e.g.
-     * Goblin's "Coins" appears 5 times across its two drop tables) - no point firing the
-     * same lookup+fetch more than once. Uses the same navigationGeneration guard as every
-     * other async panel update, so a slow-resolving icon batch from a page the user has
-     * already left can't overwrite whatever they've navigated to since.
-     */
+    @Subscribe
+    public void onMenuOptionClicked(MenuOptionClicked event)
+    {
+        if (!config.enableHotkey() || !hotkeyHeld)
+        {
+            return;
+        }
+
+        MenuAction action = event.getMenuAction();
+        String actionName = action.name();
+
+        if (actionName.equals("WALK") && lastExamineTick == client.getTickCount() && lastExamineCategory != null)
+        {
+            // The examine-only-object case: this target has no real interactive menu
+            // entry at all, so the actual default left-click action is a plain "Walk
+            // here" tile click rather than anything object-specific. Since an Examine
+            // entry for the object under the cursor was seen on this exact same tick
+            // (see lastExamineTick's own comment), treat this WALK as "clicked that
+            // object" rather than a real walk, using the info captured then rather than
+            // anything from this WALK event itself (which doesn't carry object identity
+            // the way GAME_OBJECT_* or EXAMINE_OBJECT clicks do).
+
+            event.consume();
+
+            final String walkCategory = lastExamineCategory;
+            final String walkName = lastExamineName;
+            final int walkMenuIdentifier = lastExamineMenuIdentifier;
+            final int walkItemId = lastExamineItemId;
+            clientThread.invoke(() -> handleWikiClick(walkCategory, walkName, walkMenuIdentifier, walkItemId));
+            return;
+        }
+
+        final String category;
+        if (actionName.startsWith("NPC_") || actionName.equals("EXAMINE_NPC"))
+        {
+            category = "NPC";
+        }
+        else if (actionName.startsWith("GAME_OBJECT_") || actionName.equals("EXAMINE_OBJECT"))
+        {
+            category = "OBJECT";
+        }
+        else if (actionName.startsWith("ITEM_") || actionName.startsWith("GROUND_ITEM_")
+                || actionName.equals("EXAMINE_ITEM") || actionName.equals("EXAMINE_ITEM_GROUND")
+                || actionName.equals("WIDGET_TARGET")
+                || (actionName.startsWith("CC_OP") && event.getItemId() >= 0))
+        {
+            // CC_OP ("Client Component" - a widget/interface interaction) is the real
+            // action type for clicking an item inside a widget like the inventory, as
+            // opposed to something in the game world. CC_OP is also used for lots of
+            // other non-item widget interactions (spells, prayers, settings toggles), so
+            // this requires a valid item ID too, rather than matching CC_OP alone -
+            // otherwise holding the hotkey could hijack unrelated interface clicks.
+            // WIDGET_TARGET is the real action type for "Use"-default items (e.g. Zulrah
+            // scales, Marks of grace) - clicking one normally starts a "Use X on Y"
+            // target-selection mode rather than doing anything immediately, which this
+            // consumes before that mode ever starts.
+            category = "ITEM";
+        }
+        else
+        {
+            return;
+        }
+
+        event.consume();
+
+        final String cleanName = event.getMenuTarget().replaceAll("<[^>]*>", "");
+        final int menuIdentifier = event.getId();
+        final int itemId = event.getItemId();
+
+        clientThread.invoke(() -> handleWikiClick(category, cleanName, menuIdentifier, itemId));
+    }
+
     /**
      * Caches item name -> resolved ID across the whole plugin session, not just within one
      * drop table load. Common items (Coins, runes, bones) show up in dozens of different
-     * monsters' drop tables, so without this every single examine re-asks the wiki for
-     * something we've already resolved. -1 is used as a sentinel for "confirmed
-     * unresolvable" (e.g. Clue scroll (elite), which the wiki's bucket has no clean
-     * canonical ID for) - caching the failure too means we don't keep re-attempting a
-     * lookup we already know won't succeed, since that's just as wasteful as re-fetching a
-     * success would be.
+     * monsters' drop tables, so without this every examine re-asks the wiki for something
+     * already resolved. -1 is used as a sentinel for "confirmed unresolvable" (e.g. Clue
+     * scroll (elite), which the wiki's bucket has no clean canonical ID for), so we don't
+     * keep re-attempting a lookup we already know won't succeed.
      */
     private final Map<String, Integer> resolvedItemIdCache = new ConcurrentHashMap<>();
     private final Map<Integer, BufferedImage> itemIconCache = new ConcurrentHashMap<>();
 
+    /**
+     * Sets up the lazy Combat Stats loader for an equipable item - the accordion section
+     * is always present regardless of what this determines, and shows "No combat stats
+     * available" itself if the fetch comes back empty, so this only needs a cheap
+     * pre-filter (skip the query entirely for obviously non-equipable items like food or
+     * potions) rather than eagerly fetching just to decide whether to show a button. The
+     * actual fetch only fires when the user expands the accordion, not on every examine.
+     */
+    private void setupCombatStatsButton(String pageName, String equipable, int itemId, int myGen)
+    {
+        panel.setCombatStatsSectionVisible(true);
+        boolean isEquipable = equipable != null && equipable.trim().equalsIgnoreCase("Yes");
+        if (!isEquipable)
+        {
+            panel.setCombatStatsAvailable(null);
+            return;
+        }
+
+        panel.setCombatStatsAvailable(() ->
+                itemInfoClient.fetchCombatBonuses(pageName, itemId, bonuses ->
+                        clientThread.invoke(() ->
+                        {
+                            // getSkillImage() is a local lookup (unlike the drop-table
+                            // item icons), so no async/loading-state handling is needed.
+                            Map<String, BufferedImage> skillIcons = new HashMap<>();
+                            skillIcons.put("attack", skillIconManager.getSkillImage(Skill.ATTACK));
+                            skillIcons.put("strength", skillIconManager.getSkillImage(Skill.STRENGTH));
+                            skillIcons.put("defence", skillIconManager.getSkillImage(Skill.DEFENCE));
+                            skillIcons.put("ranged", skillIconManager.getSkillImage(Skill.RANGED));
+                            skillIcons.put("magic", skillIconManager.getSkillImage(Skill.MAGIC));
+                            skillIcons.put("prayer", skillIconManager.getSkillImage(Skill.PRAYER));
+
+                            SwingUtilities.invokeLater(() ->
+                            {
+                                if (navigationGeneration.get() == myGen)
+                                {
+                                    panel.displayCombatBonuses(bonuses, skillIcons);
+                                }
+                            });
+                        })));
+    }
+
+    /**
+     * NPC version of setupCombatStatsButton - always sets up a loader rather than
+     * pre-filtering like the item side does with "equipable", since there's no similarly
+     * cheap, already-fetched signal for "is this NPC attackable" available at this point.
+     * The fetch itself is still lazy (only fires when the accordion is expanded), and
+     * displayNpcCombatStats already shows "No combat stats available" for non-combat NPCs
+     * where the query comes back empty, so the cost of skipping a pre-filter here is just
+     * one query for non-attackable NPCs a user actually chooses to expand this for, not
+     * one fired automatically on every NPC examine.
+     */
+    private void setupNpcCombatStats(String pageName, int combatLevel, int myGen)
+    {
+        panel.setCombatStatsSectionVisible(true);
+        panel.setCombatStatsAvailable(() ->
+                itemInfoClient.fetchNpcCombatStats(pageName, combatLevel, stats ->
+                        clientThread.invoke(() ->
+                        {
+                            Map<String, BufferedImage> skillIcons = new HashMap<>();
+                            skillIcons.put("hitpoints", skillIconManager.getSkillImage(Skill.HITPOINTS));
+                            skillIcons.put("attack", skillIconManager.getSkillImage(Skill.ATTACK));
+                            skillIcons.put("strength", skillIconManager.getSkillImage(Skill.STRENGTH));
+                            skillIcons.put("defence", skillIconManager.getSkillImage(Skill.DEFENCE));
+                            skillIcons.put("ranged", skillIconManager.getSkillImage(Skill.RANGED));
+                            skillIcons.put("magic", skillIconManager.getSkillImage(Skill.MAGIC));
+                            skillIcons.put("prayer", skillIconManager.getSkillImage(Skill.PRAYER));
+
+                            // Resolved via itemManager.search rather than a hardcoded item
+                            // ID, since rune item IDs found from a quick search weren't
+                            // from an authoritative source - this reuses the same
+                            // search-and-match pattern already used elsewhere in this
+                            // plugin for resolving real item icons (see handleWikiClick).
+                            // Guarded by stats != null - this NPEs for any NPC with no
+                            // combat data at all (stats is null in that case).
+                            if (stats != null)
+                            {
+                                String weaknessItemName = (stats.elementalWeaknessType == null
+                                        || stats.elementalWeaknessType.trim().isEmpty())
+                                        ? "Pure essence"
+                                        : stats.elementalWeaknessType.trim() + " rune";
+
+                                BufferedImage weaknessIcon = null;
+                                var weaknessResults = itemManager.search(weaknessItemName);
+                                if (!weaknessResults.isEmpty())
+                                {
+                                    var bestMatch = weaknessResults.stream()
+                                            .filter(r -> r.getName().equalsIgnoreCase(weaknessItemName))
+                                            .findFirst()
+                                            .orElse(weaknessResults.get(0));
+                                    weaknessIcon = itemManager.getImage(itemManager.canonicalize(bestMatch.getId()), 1, false);
+                                }
+                                skillIcons.put("elemental_weakness", weaknessIcon);
+                            }
+
+                            SwingUtilities.invokeLater(() ->
+                            {
+                                if (navigationGeneration.get() == myGen)
+                                {
+                                    panel.displayNpcCombatStats(stats, skillIcons);
+                                }
+                            });
+                        })));
+    }
+
+    /**
+     * Resolves and fetches an icon for every unique item name in an NPC's drop list, then
+     * displays the drops with those icons attached. Deduped by name first since a drop
+     * table can list the same item many times at different quantities/rarities (e.g.
+     * Goblin's "Coins" appears 5 times across its two drop tables). Uses the same
+     * navigationGeneration guard as every other async panel update, so a slow-resolving
+     * icon batch from a page the user has already left can't overwrite the current one.
+     */
     private void loadNpcDropIconsAndDisplay(List<ItemInfoClient.DropSource> drops, int myGen)
     {
         Set<String> uniqueNames = new LinkedHashSet<>();
@@ -374,34 +721,108 @@ public class ItemInfoPlugin extends Plugin
             }
         });
 
-        for (String itemName : namesNeedingLookup)
+        // Small lists (a normal NPC's own drop table) never had a rate-limiting problem
+        // with firing every lookup at once - that's fast, no reason to slow it down.
+        // Only large lists (a reward casket's ~150-190 unique reward items) risk
+        // flooding the API, so only those pay the sequential-queue slowdown below.
+        final int SEQUENTIAL_THRESHOLD = 75;
+        if (namesNeedingLookup.size() <= SEQUENTIAL_THRESHOLD)
         {
-            itemInfoClient.resolveItemIdByName(itemName, resolvedId ->
+            for (String itemName : namesNeedingLookup)
             {
-                resolvedItemIdCache.put(itemName, resolvedId != null ? resolvedId : -1);
-
-                if (resolvedId != null)
-                {
-                    clientThread.invoke(() ->
-                    {
-                        BufferedImage image = itemManager.getImage(resolvedId, 1, false);
-                        if (image != null)
-                        {
-                            itemIconCache.put(resolvedId, image);
-                            SwingUtilities.invokeLater(() ->
-                            {
-                                if (navigationGeneration.get() == myGen)
-                                {
-                                    panel.updateDropIcon(itemName, image);
-                                }
-                            });
-                        }
-                    });
-                }
-            });
+                resolveAndApplyDropIcon(itemName, myGen, null);
+            }
+        }
+        else
+        {
+            // Fully sequential rather than batched - resolveItemIdByName's own internal
+            // fallback chain (exact match -> infobox_item -> case-toggle -> bare-base-
+            // name) fires each subsequent step immediately with no delay, so batching
+            // "outer" items still let far more requests burst out than the batch size
+            // implied. Processing one item's entire resolution to completion before
+            // starting the next - with a short delay after - guarantees at most one
+            // request in flight at any moment.
+            scheduleNextIconLookup(namesNeedingLookup, 0, myGen);
         }
     }
 
+    private static final int ICON_LOOKUP_DELAY_MS = 150;
+
+    /**
+     * The fast-path version used for small lists - resolves one item's icon and applies
+     * it, with no throttling relative to any other call. Shared with the sequential queue
+     * below (via the onDone callback) so the actual resolution logic isn't duplicated
+     * between the two paths.
+     *
+     * @param onDone called once this item's resolution (including all of its own internal
+     *               fallback attempts) has fully finished - null for the fast path, which
+     *               doesn't need to know when to start the next one since it starts them
+     *               all immediately.
+     */
+    private void resolveAndApplyDropIcon(String itemName, int myGen, Runnable onDone)
+    {
+        itemInfoClient.resolveItemIdByName(itemName, resolvedId ->
+        {
+            resolvedItemIdCache.put(itemName, resolvedId != null ? resolvedId : -1);
+
+            if (resolvedId != null)
+            {
+                clientThread.invoke(() ->
+                {
+                    BufferedImage image = itemManager.getImage(resolvedId, 1, false);
+                    if (image != null)
+                    {
+                        itemIconCache.put(resolvedId, image);
+                        SwingUtilities.invokeLater(() ->
+                        {
+                            if (navigationGeneration.get() == myGen)
+                            {
+                                panel.updateDropIcon(itemName, image);
+                            }
+                        });
+                    }
+                });
+            }
+
+            if (onDone != null)
+            {
+                onDone.run();
+            }
+        });
+    }
+
+    private void scheduleNextIconLookup(List<String> namesNeedingLookup, int index, int myGen)
+    {
+        if (index >= namesNeedingLookup.size())
+        {
+            return;
+        }
+
+        String itemName = namesNeedingLookup.get(index);
+        resolveAndApplyDropIcon(itemName, myGen, () ->
+        {
+            // Only schedules the next lookup once this one (including all of its own
+            // internal fallback attempts) has fully finished - this is what actually
+            // guarantees sequential, non-overlapping requests, rather than just spacing
+            // out when each "top-level" lookup starts.
+            new java.util.Timer().schedule(new java.util.TimerTask()
+            {
+                @Override
+                public void run()
+                {
+                    scheduleNextIconLookup(namesNeedingLookup, index + 1, myGen);
+                }
+            }, ICON_LOOKUP_DELAY_MS);
+        });
+    }
+
+    /**
+     * Maps the wiki's "Drop type" field (e.g. "mining", "hunter", "fishing") to the
+     * matching RuneLite {@link Skill} and returns its real game icon, for skilling-type
+     * item sources where a bare level number doesn't mean much without knowing which
+     * skill it's for (e.g. a Coal rock's "level 30" is a Mining level). Returns null for
+     * "combat", "reward", or anything else that isn't an actual skill name.
+     */
     private BufferedImage skillIconForDropType(String dropType)
     {
         if (dropType == null)
@@ -420,6 +841,16 @@ public class ItemInfoPlugin extends Plugin
         }
     }
 
+    /**
+     * Resolves the precise in-game ID for the thing that was actually clicked, so we can
+     * do an exact wiki lookup instead of guessing from the (often ambiguous) display name.
+     * <p>
+     * For NPCs, the menu identifier is the NPC's index in the world's NPC list, not its
+     * composition ID - so we look the NPC up by index to get its real ID. For objects, the
+     * menu identifier is already the object's ID directly.
+     *
+     * @return the resolved game ID, or -1 if it couldn't be determined
+     */
     private int resolveGameId(String category, int menuIdentifier)
     {
         if (category.equals("NPC"))
@@ -443,6 +874,27 @@ public class ItemInfoPlugin extends Plugin
             // since the menu identifier here isn't reliably the item's real ID.
             return menuIdentifier;
         }
+    }
+
+    /**
+     * Resolves the actual in-game combat level of the specific NPC instance that was
+     * clicked, using the same live client.getNpcs() lookup as resolveGameId above. Exists
+     * to fix incorrect combat stats for multi-form NPCs (e.g. Dark wizard - 5 different
+     * combat-level variants sharing one wiki page): without this, fetchNpcCombatStats's
+     * bucket query had no way to tell the forms apart. Returns -1 if the NPC can't be
+     * found live (e.g. reached via "Back" or a Drops-list link, where there's no live NPC
+     * object to query) - fetchNpcCombatStats treats -1 as "unknown".
+     */
+    private int resolveNpcCombatLevel(int menuIdentifier)
+    {
+        for (NPC npc : client.getNpcs())
+        {
+            if (npc.getIndex() == menuIdentifier)
+            {
+                return npc.getCombatLevel();
+            }
+        }
+        return -1;
     }
 
     /**
@@ -490,6 +942,20 @@ public class ItemInfoPlugin extends Plugin
         {
             recordOriginalView(category, name, gameId);
         }
+
+        // Reading the player's combat level here (rather than later, e.g. inside the lazy
+        // sources loader) is important: this method already runs on the client thread via
+        // clientThread.invoke, so it's safe to touch client state directly - unlike the
+        // sources loader itself, which runs later on the Swing/EDT thread, where touching
+        // client state would not be safe.
+        // <p>
+        // This used to be computed only inside the ITEM branch below, so
+        // panel.setPlayerCombatLevel() was never called when viewing an NPC - meaning the
+        // NPC Properties "Combat level" row only got proper color-coding if the player had
+        // already looked up an item earlier in the same session. Moved here so it's set
+        // consistently regardless of category.
+        final int playerCombatLevel = client.getLocalPlayer() != null
+                ? client.getLocalPlayer().getCombatLevel() : -1;
 
         final String cargoTable;
         if (category.equals("NPC"))
@@ -562,13 +1028,8 @@ public class ItemInfoPlugin extends Plugin
                 lowAlch = (int) (comp.getPrice() * 0.4);
             }
 
-            // Reading the player's combat level here (rather than later, e.g. inside the
-            // lazy sources loader) is important: this method already runs on the client
-            // thread via clientThread.invoke, so it's safe to touch client state directly.
-            // The sources loader itself runs later on the Swing/EDT thread when the user
-            // expands the section, where touching client state would not be safe.
-            final int playerCombatLevel = client.getLocalPlayer() != null
-                    ? client.getLocalPlayer().getCombatLevel() : -1;
+            // playerCombatLevel is now computed once at the top of handleWikiClick,
+            // shared across all categories - see that comment for the bug this fixes.
 
             final BufferedImage finalImage = image;
             final int finalPrice = price;
@@ -592,6 +1053,14 @@ public class ItemInfoPlugin extends Plugin
                 {
                     final String pageName = (exactName != null) ? exactName : name;
 
+                    SwingUtilities.invokeLater(() ->
+                    {
+                        if (navigationGeneration.get() == myGen)
+                        {
+                            panel.setWikiPageName(pageName);
+                        }
+                    });
+
                     itemInfoClient.fetchDescription(pageName, desc ->
                             SwingUtilities.invokeLater(() ->
                             {
@@ -607,6 +1076,7 @@ public class ItemInfoPlugin extends Plugin
                                 if (navigationGeneration.get() == myGen)
                                 {
                                     panel.setItemProperties(info);
+                                    setupCombatStatsButton(pageName, info.equipable, finalItemId, myGen);
                                 }
                             }));
 
@@ -630,23 +1100,31 @@ public class ItemInfoPlugin extends Plugin
                         {
                             return;
                         }
-                        panel.setShopsSectionVisible(true);
-                        panel.setNpcDropsMode(false);
+                        boolean isRewardCasket = itemInfoClient.isRewardCasketName(pageName);
+                        panel.setShopsSectionVisible(!isRewardCasket);
+                        panel.setNpcDropsMode(isRewardCasket, isRewardCasket ? "Rewards" : "Drops");
                         panel.setSourcesLoader(() ->
-                                itemInfoClient.fetchItemSources(pageName, sources ->
+                                itemInfoClient.fetchItemSources(pageName, finalItemId, sources ->
                                         clientThread.invoke(() ->
                                         {
                                             for (ItemInfoClient.DropSource drop : sources.drops)
                                             {
                                                 drop.skillIcon = skillIconForDropType(drop.dropType);
                                             }
-                                            SwingUtilities.invokeLater(() ->
+                                            if (isRewardCasket)
                                             {
-                                                if (navigationGeneration.get() == myGen)
+                                                loadNpcDropIconsAndDisplay(sources.drops, myGen);
+                                            }
+                                            else
+                                            {
+                                                SwingUtilities.invokeLater(() ->
                                                 {
-                                                    panel.setSources(sources.drops, sources.shops);
-                                                }
-                                            });
+                                                    if (navigationGeneration.get() == myGen)
+                                                    {
+                                                        panel.setSources(sources.drops, sources.shops);
+                                                    }
+                                                });
+                                            }
                                         })));
                     });
                 });
@@ -662,10 +1140,19 @@ public class ItemInfoPlugin extends Plugin
                 }
                 clientToolbar.openPanel(navButton);
                 panel.showNonItem(name);
+                panel.setPlayerCombatLevel(playerCombatLevel);
 
                 itemInfoClient.resolveExactPageName(cargoTable, gameId, exactName ->
                 {
                     final String pageName = (exactName != null) ? exactName : name;
+
+                    SwingUtilities.invokeLater(() ->
+                    {
+                        if (navigationGeneration.get() == myGen)
+                        {
+                            panel.setWikiPageName(pageName);
+                        }
+                    });
 
                     itemInfoClient.fetchDescription(pageName, desc ->
                             SwingUtilities.invokeLater(() ->
@@ -695,6 +1182,18 @@ public class ItemInfoPlugin extends Plugin
                                     }
                                 }));
 
+                        clientThread.invoke(() ->
+                        {
+                            int npcCombatLevel = resolveNpcCombatLevel(menuIdentifier);
+                            SwingUtilities.invokeLater(() ->
+                            {
+                                if (navigationGeneration.get() == myGen)
+                                {
+                                    setupNpcCombatStats(pageName, npcCombatLevel, myGen);
+                                }
+                            });
+                        });
+
                         // showNonItem() clears the sources loader by default (Objects don't
                         // have drops), so it's re-enabled here specifically for NPCs - same
                         // Item Sources > Drops UI as items use, just fetching the monster's
@@ -723,6 +1222,9 @@ public class ItemInfoPlugin extends Plugin
                                         panel.setObjectProperties(info);
                                     }
                                 }));
+
+                        panel.setCombatStatsSectionVisible(false);
+                        panel.setCombatStatsAvailable(null);
                     }
                 });
             });
@@ -730,15 +1232,29 @@ public class ItemInfoPlugin extends Plugin
     }
 
     /**
-     * Shows an NPC's wiki info by name - either directly (gameId == -1, e.g. reached via a
-     * Drops-list link click, where the name is already the wiki's exact page_name from
-     * bucket data) or by first resolving the exact page name from a real gameId (e.g. going
-     * back to an originally right-clicked NPC) - this second step is what the original
-     * right-click flow always did and what showNpcByName was missing before, which is why
-     * the image (and potentially description/infobox) could silently fail to load on
-     * "back" if the raw examine-text name didn't exactly match the wiki's page title.
+     * Strips a sub-location suffix like " (Wilderness Slayer Cave)" before using a clicked
+     * drop-row name for NPC navigation - that suffix was artificially added by
+     * ItemInfoPanel's formatSourceName for monster names with regional variants (e.g.
+     * "Cyclops" in the Warriors' Guild Basement), not part of the monster's own real name.
+     * <p>
+     * Only applied as a fallback after the raw, unstripped name has already been tried as
+     * a real item and failed - stripping unconditionally, before that item check, cuts
+     * "Reward casket (hard)" down to just "Reward casket", which isn't a real, resolvable
+     * item, causing container-type drop sources to get misidentified as monsters.
      */
-    private void showNpcByName(String npcName, int gameId, boolean recordHistory)
+    private String stripSubLocationForNav(String name)
+    {
+        int idx = name.indexOf(" (");
+        return idx > 0 ? name.substring(0, idx) : name;
+    }
+
+    /**
+     * Shows an NPC's wiki info by name - either directly (gameId == -1, e.g. reached via a
+     * Drops-list link click, where the name is already the wiki's exact page_name) or by
+     * first resolving the exact page name from a real gameId (e.g. going back to an
+     * originally right-clicked NPC).
+     */
+    private void showNpcByName(String npcName, int gameId, boolean recordHistory, int combatLevel)
     {
         if (recordHistory)
         {
@@ -749,15 +1265,27 @@ public class ItemInfoPlugin extends Plugin
         if (gameId >= 0)
         {
             itemInfoClient.resolveExactPageName("npc_id", gameId, exactName ->
-                    displayNpc((exactName != null) ? exactName : npcName, myGen));
+                    displayNpc((exactName != null) ? exactName : npcName, myGen, combatLevel));
         }
         else
         {
-            displayNpc(npcName, myGen);
+            displayNpc(npcName, myGen, combatLevel);
         }
     }
 
-    private void displayNpc(String npcName, int myGen)
+    /**
+     * @param combatLevel a real, known combat level if available (e.g. from a drop-table
+     *                    row's own "level" field - see ItemInfoPanel's dropRowClickListener
+     *                    for why that's a reliable proxy), or -1 if unknown (e.g. reached
+     *                    via "Back", where no such context exists). Threading a real value
+     *                    through here, rather than always passing -1, fixes multi-form
+     *                    monsters (e.g. Thermonuclear smoke devil, Iron dragons) showing no
+     *                    combat stats when reached via a drop-table link - the old
+     *                    always-(-1) behavior skipped the combat-level-filtered query and
+     *                    fell back to a page_name-only lookup that can't disambiguate
+     *                    between a monster's multiple forms.
+     */
+    private void displayNpc(String npcName, int myGen, int combatLevel)
     {
         // This is called from resolveExactPageName's callback, which fires on OkHttp's
         // background dispatcher thread, not the EDT - clientToolbar.openPanel() and the
@@ -773,6 +1301,27 @@ public class ItemInfoPlugin extends Plugin
             }
             clientToolbar.openPanel(navButton);
             panel.showNonItem(npcName);
+            panel.setWikiPageName(npcName);
+            setupNpcCombatStats(npcName, combatLevel, myGen);
+
+            // Same fix as handleWikiClick's shared playerCombatLevel computation - this
+            // path (reached via "Back" or a Drops-list link) needs it set here too, so
+            // the Properties "Combat level" row's color coding is always correct rather
+            // than depending on whether an item was viewed earlier in the session.
+            // Wrapped in clientThread.invoke since this method doesn't already run on
+            // the client thread the way handleWikiClick does.
+            clientThread.invoke(() ->
+            {
+                int playerCombatLevel = client.getLocalPlayer() != null
+                        ? client.getLocalPlayer().getCombatLevel() : -1;
+                SwingUtilities.invokeLater(() ->
+                {
+                    if (navigationGeneration.get() == myGen)
+                    {
+                        panel.setPlayerCombatLevel(playerCombatLevel);
+                    }
+                });
+            });
 
             itemInfoClient.fetchDescription(npcName, desc ->
                     SwingUtilities.invokeLater(() ->
@@ -843,6 +1392,9 @@ public class ItemInfoPlugin extends Plugin
             }
             clientToolbar.openPanel(navButton);
             panel.showNonItem(objectName);
+            panel.setWikiPageName(objectName);
+            panel.setCombatStatsSectionVisible(false);
+            panel.setCombatStatsAvailable(null);
 
             itemInfoClient.fetchDescription(objectName, desc ->
                     SwingUtilities.invokeLater(() ->
@@ -868,6 +1420,19 @@ public class ItemInfoPlugin extends Plugin
                             panel.setObjectProperties(info);
                         }
                     }));
+
+            // Objects had no sources loader wired up at all before this - most objects
+            // (trees, doors, decorative scenery) genuinely have nothing here, but some
+            // (e.g. "Chest (Tombs of Amascut)", a raid reward chest) are containers with
+            // real contents tracked the same way in dropsline. Reuses fetchNpcDrops,
+            // which just queries by page_name regardless of whether the "source" is an
+            // NPC or an object, plus the same icon-loading path already used for reward
+            // casket contents.
+            panel.setShopsSectionVisible(false);
+            panel.setNpcDropsMode(true, "Rewards");
+            panel.setSourcesLoader(() ->
+                    itemInfoClient.fetchNpcDrops(objectName, drops ->
+                            loadNpcDropIconsAndDisplay(drops, myGen)));
         });
     }
 
@@ -875,9 +1440,7 @@ public class ItemInfoPlugin extends Plugin
      * Shows an item's wiki info - either from a real gameId already known (going back to an
      * originally right-clicked item) or by resolving one from the name first (reached via a
      * Drops-list link click). Either way, once an ID is known, the exact wiki page name is
-     * resolved from it before any content fetches - same fix as the NPC/Object flows above,
-     * and also fixes a latent version of this bug that existed even on the initial link-
-     * click path (description/infobox/sources were using the raw name directly before).
+     * resolved from it before any content fetches.
      */
     private void showItemByName(String itemName, int gameId, boolean recordHistory)
     {
@@ -933,6 +1496,7 @@ public class ItemInfoPlugin extends Plugin
                     }
                     clientToolbar.openPanel(navButton);
                     panel.showItem(realName, finalImage, finalPrice, finalHighAlch, finalLowAlch);
+                    panel.setWikiPageName(pageName);
 
                     itemInfoClient.fetchDescription(pageName, desc ->
                             SwingUtilities.invokeLater(() ->
@@ -949,6 +1513,7 @@ public class ItemInfoPlugin extends Plugin
                                 if (navigationGeneration.get() == myGen)
                                 {
                                     panel.setItemProperties(info);
+                                    setupCombatStatsButton(pageName, info.equipable, itemId, myGen);
                                 }
                             }));
 
@@ -970,23 +1535,31 @@ public class ItemInfoPlugin extends Plugin
                         {
                             return;
                         }
-                        panel.setShopsSectionVisible(true);
-                        panel.setNpcDropsMode(false);
+                        boolean isRewardCasket = itemInfoClient.isRewardCasketName(pageName);
+                        panel.setShopsSectionVisible(!isRewardCasket);
+                        panel.setNpcDropsMode(isRewardCasket, isRewardCasket ? "Rewards" : "Drops");
                         panel.setSourcesLoader(() ->
-                                itemInfoClient.fetchItemSources(pageName, sources ->
+                                itemInfoClient.fetchItemSources(pageName, itemId, sources ->
                                         clientThread.invoke(() ->
                                         {
                                             for (ItemInfoClient.DropSource drop : sources.drops)
                                             {
                                                 drop.skillIcon = skillIconForDropType(drop.dropType);
                                             }
-                                            SwingUtilities.invokeLater(() ->
+                                            if (isRewardCasket)
                                             {
-                                                if (navigationGeneration.get() == myGen)
+                                                loadNpcDropIconsAndDisplay(sources.drops, myGen);
+                                            }
+                                            else
+                                            {
+                                                SwingUtilities.invokeLater(() ->
                                                 {
-                                                    panel.setSources(sources.drops, sources.shops);
-                                                }
-                                            });
+                                                    if (navigationGeneration.get() == myGen)
+                                                    {
+                                                        panel.setSources(sources.drops, sources.shops);
+                                                    }
+                                                });
+                                            }
                                         })));
                     });
                 });
