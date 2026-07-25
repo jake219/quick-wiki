@@ -1,7 +1,6 @@
 package com.jake219.quickwiki;
 
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 
@@ -17,13 +16,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
-import java.util.function.Consumer;
-import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Slf4j
-public class ItemInfoPanel extends PluginPanel
+public class ItemInfoPanel extends PluginPanel implements Scrollable
 {
     private final JLabel nameLabel = new JLabel();
     private final JLabel iconLabel = new JLabel();
@@ -38,13 +35,20 @@ public class ItemInfoPanel extends PluginPanel
     private final JLabel itemSourcesHeaderLabel = new JLabel();
     private final JLabel dropsHeaderLabel = new JLabel();
     private final JLabel shopsHeaderLabel = new JLabel();
+    private final JLabel materialsHeaderLabel = new JLabel();
     private final JLabel combatStatsHeaderLabel = new JLabel();
-    private final JPanel combatStatsContent = new JPanel();
+
+    private final JPanel combatStatsContent = new WidthTrackingPanel();
+    private JScrollPane combatScrollPane;
+    private JScrollPane sourcesScrollPane;
+    private static final int DROP_DISPLAY_CAP = 100;
+    private static final int MIN_CARD_HEIGHT = 100;
 
     private final JPanel viewContainer = new JPanel(new BorderLayout(0, 10));
     private JPanel mainView;
     private JPanel iconNamePanel;
     private JPanel emptyStatePanel;
+    private JPanel footerPanel;
     private final JPanel attackBonusRow = new JPanel(new GridLayout(1, 3, 4, 0));
     private final JPanel attackBonusRow2 = new JPanel(new GridLayout(1, 2, 4, 0));
     private final JPanel defenceBonusRow = new JPanel(new GridLayout(1, 3, 4, 0));
@@ -64,25 +68,26 @@ public class ItemInfoPanel extends PluginPanel
     private boolean combatStatsHovering = false;
 
     private JPanel infoTable;
+    private JPanel priceGraphPanel;
+    private Sparkline sparkline;
+    private Ticker priceTicker;
+
+    private static final String[] GRAPH_RANGES = {"1D", "1W", "1M", "1Y"};
+    private final java.util.Map<String, JLabel> rangeButtons = new java.util.HashMap<>();
+    private JLabel graphTitle;
+    private String graphRange = "1M";
+    private Runnable graphRangeListener;
     private JPanel propertiesPanel;
     private JPanel descriptionPanel;
     private JPanel descriptionContent;
+    private final JPanel descriptionTail = new JPanel();
     private JPanel itemSourcesPanel;
-    private JPanel itemSourcesContent;
     private JPanel dropsContent;
-    private JScrollPane dropsScrollPane;
-    /** Max height (px) the Drops list grows to before it starts scrolling internally,
-     * keeping the "Drops" header fixed in place above it. */
-    private static final int SOURCES_MAX_HEIGHT = 375;
-    private static final int DESCRIPTION_MAX_HEIGHT = 400;
     private JPanel shopsContent;
-    private JScrollPane shopsScrollPane;
     private JScrollPane descriptionScrollPane;
 
     private String lastFullDescription = "";
-    /** Price data captured in showItem(), rendered later by setItemProperties() once the
-     * wiki infobox data has also arrived, so the whole Properties table can be built in one
-     * deliberately-ordered pass instead of whatever order data happens to show up in. */
+
     private int pendingPrice;
     private int pendingHighAlch;
     private int pendingLowAlch;
@@ -93,30 +98,16 @@ public class ItemInfoPanel extends PluginPanel
     private boolean descriptionExpanded = true;
     private boolean descriptionHovering = false;
     private boolean itemSourcesExpanded = false;
-    /** When true, the outer "Item sources" accordion relabels to singleSectionLabel and the
-     * redundant nested "Drops" toggle is skipped entirely - a single-source case (a
-     * monster's own drops, or a reward casket's own contents) only has the one list (no
-     * shops), so nesting it under an "Item sources" umbrella is an unnecessary extra click
-     * and a label that doesn't really fit. Items keep the normal two-level
-     * Item Sources > Drops/Shops structure. */
+
     private boolean npcDropsMode = false;
-    /** The label used for the outer accordion when npcDropsMode is true - "Drops" for an
-     * NPC's own drop table, "Rewards" for a reward casket's contents, etc. Set via
-     * setNpcDropsMode's label parameter; defaults to "Drops" for anywhere that still calls
-     * the old single-argument convenience overload. */
+
     private String singleSectionLabel = "Drops";
-    /** Registered by the plugin, since only it has access to game/client resources needed
-     * to actually resolve and display a clicked drop-row name. Receives the clicked name
-     * (already stripped of any sub-location suffix for monster names) and the drop row's
-     * own "level" field - for NPC navigation, this is a reliable proxy for the monster's
-     * actual combat level (verified against Frost Nagua's own drop_json blob, where "Drop
-     * level":"104" matched its Properties "Combat level: 104" exactly), used so drop-table
-     * navigation to a monster can reuse the same combat-level-filtered query direct
-     * in-world clicks already get, rather than always falling back to page_name-only.
-     * May be null/empty or not meaningful for item navigation (npcDropsMode) - the plugin
-     * ignores it in that case since items don't have combat levels. */
+
     private BiConsumer<String, String> dropRowClickListener;
-    /** Registered by the plugin - fired when the back button is clicked. */
+    private java.util.function.Consumer<String> materialClickListener;
+    private final Map<String, List<JLabel>> materialIconLabels = new HashMap<>();
+    private BufferedImage facilityIcon;
+
     private Runnable backButtonListener;
     private boolean itemSourcesHovering = false;
     private boolean dropsExpanded = false;
@@ -124,35 +115,16 @@ public class ItemInfoPanel extends PluginPanel
     private boolean shopsExpanded = false;
     private boolean shopsHovering = false;
 
-    /**
-     * Set the first time the Item Sources section is expanded, since a single combined
-     * fetch covers both drops and shops - we only need to fire it once per item, regardless
-     * of which of the two nested rows (Drops/Shops) the user opens first.
-     */
     private boolean sourcesRequested = false;
 
-    /** Cached once the combined fetch resolves, so re-collapsing/re-expanding afterward
-     * doesn't need to re-fetch or re-build anything. */
     private List<ItemInfoClient.DropSource> cachedDrops;
-    /** item name -> every currently-visible row's icon label showing that item, so a
-     * resolved icon can be applied to all matching rows at once via updateDropIcon(). */
+
     private final Map<String, List<JLabel>> dropIconLabels = new HashMap<>();
     private List<ItemInfoClient.ShopSource> cachedShops;
 
-    /**
-     * Set by the plugin each time an item is examined (it has to read this from the game
-     * client, which the panel itself has no access to). -1 means unknown/unavailable, in
-     * which case monster levels are shown in a neutral color rather than guessing.
-     */
     private int playerCombatLevel = -1;
     private boolean showTooltips = true;
 
-    /**
-     * Real game sprites (coins item icon, equipment-weight icon), fetched once by the
-     * plugin at startup since they're static rather than per-item. Null until they arrive
-     * (or if a fetch ever fails), in which case the existing hand-drawn icons are used as
-     * a fallback rather than showing nothing.
-     */
     private Icon realCoinIcon;
     private Icon realWeightIcon;
     private Icon realYesIcon;
@@ -166,14 +138,11 @@ public class ItemInfoPanel extends PluginPanel
     private Icon realAggressiveIcon;
     private Icon realMemberIcon;
     private Icon realF2pIcon;
+    private Icon realTradeableIcon;
+    private Icon realEquipableIcon;
+    private Icon realStackableIcon;
 
-    /**
-     * Set by the plugin each time a new item is shown. Invoked lazily, the first time the
-     * user expands the Item Sources section, so we don't fire a bucket query for every
-     * single examine click - only for the ones where the user actually wants sources.
-     */
     private Runnable sourcesLoader;
-
 
     private static final Color GOLD = new Color(224, 168, 58);
     private static final Color GOLD_HOVER = new Color(240, 195, 110);
@@ -183,6 +152,33 @@ public class ItemInfoPanel extends PluginPanel
     private static final Color NEUTRAL = new Color(160, 160, 160);
     private static final Color NEUTRAL_HOVER = new Color(215, 215, 215);
 
+    private static final Color ORANGE = new Color(255, 152, 31);
+    private static final Color BG_WARM = new Color(33, 30, 25);
+    private static final Color CARD_BG = new Color(43, 40, 33);
+    private static final Color CARD_BORDER = new Color(60, 54, 42);
+    private static final Color METHOD_BG = new Color(52, 46, 36);
+    private static final Color TAB_BG = new Color(27, 24, 19);
+    private static final Color TAB_ACTIVE_BG = new Color(52, 45, 33);
+    private static final Color TAB_INACTIVE_FG = new Color(150, 137, 106);
+
+    private static final String TAB_STATS = "STATS";
+    private static final String TAB_COMBAT = "COMBAT";
+    private static final String TAB_SOURCES = "SOURCES";
+    private static final String TAB_INFO = "INFO";
+
+    private JPanel tabBar;
+    private JPanel contentHolder;
+    private final JLabel priceSubLabel = new JLabel();
+    private String currentTab = TAB_STATS;
+    private boolean combatTabVisible = true;
+    private boolean sourcesTabVisible = false;
+    private JPanel dropsCard;
+    private JPanel shopsCard;
+    private JPanel materialsCard;
+    private JPanel materialsContent;
+    private final Map<String, JComponent> tabContent = new HashMap<>();
+    private final Map<String, JLabel> tabButtons = new HashMap<>();
+
     public ItemInfoPanel()
     {
         setLayout(new BorderLayout());
@@ -190,11 +186,11 @@ public class ItemInfoPanel extends PluginPanel
         nameLabel.setFont(FontManager.getRunescapeBoldFont().deriveFont(25f));
         nameLabel.setForeground(GOLD);
 
-        descriptionHeaderLabel.setFont(new Font("Segoe UI", Font.BOLD, 13));
+        descriptionHeaderLabel.setFont(FontManager.getRunescapeBoldFont());
         descriptionHeaderLabel.setForeground(new Color(150, 150, 150));
         descriptionHeaderLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        descriptionArea.setFont(FontManager.getRunescapeFont());
+        descriptionArea.setFont(FontManager.getRunescapeFont().deriveFont(16f));
         descriptionArea.setForeground(Color.WHITE);
         descriptionArea.setLineWrap(true);
         descriptionArea.setWrapStyleWord(true);
@@ -205,7 +201,7 @@ public class ItemInfoPanel extends PluginPanel
                 BorderFactory.createEmptyBorder(0, 8, 0, 0)
         ));
 
-        readMoreLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        readMoreLabel.setFont(FontManager.getRunescapeFont().deriveFont(16f));
         readMoreLabel.setForeground(GOLD);
         readMoreLabel.setIconTextGap(4);
         readMoreLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
@@ -234,7 +230,7 @@ public class ItemInfoPanel extends PluginPanel
             }
         });
 
-        backToTopLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        backToTopLabel.setFont(FontManager.getRunescapeFont());
         backToTopLabel.setForeground(new Color(150, 150, 150));
         backToTopLabel.setIcon(createTriangleIcon(DIR_UP, new Color(150, 150, 150)));
         backToTopLabel.setIconTextGap(4);
@@ -267,7 +263,7 @@ public class ItemInfoPanel extends PluginPanel
         nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         descriptionArea.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        backButtonLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        backButtonLabel.setFont(FontManager.getRunescapeFont().deriveFont(16f));
         backButtonLabel.setForeground(NEUTRAL);
         backButtonLabel.setIcon(createTriangleIcon(DIR_LEFT, NEUTRAL));
         backButtonLabel.setIconTextGap(4);
@@ -301,7 +297,7 @@ public class ItemInfoPanel extends PluginPanel
         });
 
         JLabel wikiLinkLabel = new JLabel("Wiki");
-        wikiLinkLabel.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        wikiLinkLabel.setFont(FontManager.getRunescapeFont().deriveFont(16f));
         wikiLinkLabel.setForeground(NEUTRAL);
         wikiLinkLabel.setIcon(createInfoIcon(NEUTRAL));
         wikiLinkLabel.setIconTextGap(4);
@@ -340,27 +336,42 @@ public class ItemInfoPanel extends PluginPanel
         topRow.setOpaque(false);
         topRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         topRow.add(backButtonLabel, BorderLayout.WEST);
-        topRow.add(wikiLinkLabel, BorderLayout.EAST);
 
         iconNamePanel = new JPanel();
         iconNamePanel.setLayout(new BoxLayout(iconNamePanel, BoxLayout.Y_AXIS));
+        iconNamePanel.setOpaque(false);
         iconNamePanel.add(topRow);
         iconNamePanel.add(Box.createVerticalStrut(6));
 
-        // Icon and name sit side-by-side rather than stacked - saves a full row of
-        // vertical space that stacking used to cost, freeing up room elsewhere in the
-        // panel (e.g. for larger property text) without growing the overall height.
         JPanel iconNameRow = new JPanel();
         iconNameRow.setLayout(new BoxLayout(iconNameRow, BoxLayout.X_AXIS));
         iconNameRow.setOpaque(false);
         iconNameRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         iconLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
-        nameLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+
+        JPanel nameStack = new JPanel();
+        nameStack.setLayout(new BoxLayout(nameStack, BoxLayout.Y_AXIS));
+        nameStack.setOpaque(false);
+        nameStack.setAlignmentY(Component.CENTER_ALIGNMENT);
+        nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        priceSubLabel.setFont(FontManager.getRunescapeFont().deriveFont(16f));
+        priceSubLabel.setForeground(GOLD);
+        priceSubLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        nameStack.add(nameLabel);
+        nameStack.add(priceSubLabel);
+
         iconNameRow.add(iconLabel);
         iconNameRow.add(Box.createHorizontalStrut(10));
-        iconNameRow.add(nameLabel);
+        iconNameRow.add(nameStack);
 
         iconNamePanel.add(iconNameRow);
+
+        priceTicker = new Ticker();
+        priceTicker.setAlignmentX(Component.LEFT_ALIGNMENT);
+        priceTicker.setVisible(false);
+        iconNamePanel.add(Box.createVerticalStrut(5));
+        iconNamePanel.add(priceTicker);
+
         iconNamePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         iconNamePanel.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
@@ -370,36 +381,47 @@ public class ItemInfoPanel extends PluginPanel
         infoTable.setAlignmentX(Component.LEFT_ALIGNMENT);
         infoTable.setVisible(false);
 
-        wireAccordionHeader(propertiesHeaderLabel, () -> "Properties", () -> propertiesExpanded,
-                () -> propertiesHovering, hovering -> propertiesHovering = hovering, this::toggleProperties);
+        sparkline = new Sparkline();
+        sparkline.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        wireAccordionHeader(descriptionHeaderLabel, () -> "Description", () -> descriptionExpanded,
-                () -> descriptionHovering, hovering -> descriptionHovering = hovering, this::toggleDescription);
+        sparkline.setPreferredHeight(210);
+        sparkline.setMaximumSize(new Dimension(Integer.MAX_VALUE, 210));
 
-        // Properties section: flat header (chevron + title, no boxed card) with a thin
-        // divider line underneath, matching the reference style - collapsible stats grid.
-        propertiesPanel = new JPanel();
-        propertiesPanel.setLayout(new BoxLayout(propertiesPanel, BoxLayout.Y_AXIS));
-        // Opaque with the standard RuneLite panel background, not transparent like most
-        // panels in this file - this is specifically the panel where stale pixels have
-        // been observed ghosting through after the button's presence changes. Being
-        // non-opaque means Swing never guarantees a background clear before redrawing,
-        // regardless of which code path (ours or something else entirely, e.g. Item
-        // Sources' own independent async updates) triggers the repaint. A solid matching
-        // background fixes this at the root for every trigger, not just one call site.
-        propertiesPanel.setOpaque(true);
-        propertiesPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
-        propertiesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        propertiesPanel.add(propertiesHeaderLabel);
-        propertiesPanel.add(Box.createVerticalStrut(6));
-        propertiesPanel.add(infoTable);
-        propertiesPanel.add(Box.createVerticalStrut(8));
-        propertiesPanel.add(createDivider());
-        propertiesPanel.setVisible(false);
+        graphTitle = new JLabel("PAST MONTH");
+        graphTitle.setFont(FontManager.getRunescapeSmallFont());
+        graphTitle.setForeground(TAB_INACTIVE_FG);
+        graphTitle.setVerticalAlignment(SwingConstants.CENTER);
 
-        // Item Sources: same flat header treatment as Properties/Description, but expanding
-        // it reveals two further nested dropdown rows (Drops/Shops) rather than a stats
-        // grid - matches the reference's "Sources > Drops/Shops" nested structure.
+        JPanel graphHeader = new JPanel(new BorderLayout());
+        graphHeader.setOpaque(false);
+        graphHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
+        graphHeader.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
+        graphHeader.add(graphTitle, BorderLayout.WEST);
+        graphHeader.add(buildGraphRangeBar(), BorderLayout.EAST);
+
+        priceGraphPanel = new JPanel();
+        priceGraphPanel.setLayout(new BoxLayout(priceGraphPanel, BoxLayout.Y_AXIS));
+        priceGraphPanel.setOpaque(false);
+        priceGraphPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        priceGraphPanel.add(createDivider());
+        priceGraphPanel.add(Box.createVerticalStrut(7));
+        priceGraphPanel.add(graphHeader);
+        priceGraphPanel.add(Box.createVerticalStrut(5));
+        priceGraphPanel.add(sparkline);
+        priceGraphPanel.setVisible(false);
+
+        JPanel graphWrapper = new JPanel(new BorderLayout());
+        graphWrapper.setOpaque(false);
+        graphWrapper.add(priceGraphPanel, BorderLayout.NORTH);
+
+        JPanel propertiesBody = new JPanel(new BorderLayout(0, 10));
+        propertiesBody.setOpaque(false);
+        propertiesBody.setAlignmentX(Component.LEFT_ALIGNMENT);
+        propertiesBody.add(infoTable, BorderLayout.NORTH);
+        propertiesBody.add(graphWrapper, BorderLayout.CENTER);
+
+        propertiesPanel = cardFilling(propertiesHeaderLabel, "Properties", propertiesBody);
+
         itemSourcesPanel = buildItemSourcesSection();
 
         JPanel actionsRow = new JPanel(new BorderLayout());
@@ -409,10 +431,6 @@ public class ItemInfoPanel extends PluginPanel
         actionsRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         actionsRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 20));
 
-        // Same fixed-height/internal-scroll treatment as Drops/Shops - a long description
-        // scrolls within its own confined area instead of pushing the whole page down,
-        // while actionsRow (Read more/Back to top) stays outside it, always visible.
-        // Sized dynamically in refreshDescriptionText() based on the actual text height.
         descriptionScrollPane = new JScrollPane(descriptionArea);
         descriptionScrollPane.setOpaque(false);
         descriptionScrollPane.getViewport().setOpaque(false);
@@ -427,60 +445,102 @@ public class ItemInfoPanel extends PluginPanel
         descriptionContent.setLayout(new BoxLayout(descriptionContent, BoxLayout.Y_AXIS));
         descriptionContent.setOpaque(false);
         descriptionContent.setAlignmentX(Component.LEFT_ALIGNMENT);
+        descriptionContent.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
         descriptionContent.add(descriptionScrollPane);
-        descriptionContent.add(Box.createVerticalStrut(8));
+        descriptionContent.add(Box.createVerticalStrut(6));
         descriptionContent.add(actionsRow);
 
-        descriptionPanel = new JPanel();
-        descriptionPanel.setLayout(new BoxLayout(descriptionPanel, BoxLayout.Y_AXIS));
-        descriptionPanel.setOpaque(false);
-        descriptionPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        descriptionPanel.add(descriptionHeaderLabel);
-        descriptionPanel.add(Box.createVerticalStrut(6));
-        descriptionPanel.add(descriptionContent);
-        descriptionPanel.setVisible(false);
+        descriptionTail.setOpaque(false);
+        descriptionTail.setAlignmentX(Component.LEFT_ALIGNMENT);
+        descriptionTail.setPreferredSize(new Dimension(0, 0));
+        descriptionContent.add(descriptionTail);
 
-        mainView = new JPanel();
-        mainView.setLayout(new BoxLayout(mainView, BoxLayout.Y_AXIS));
-        // Opaque by JPanel's default already, but the color was never explicitly set
-        // before - fixing that for consistency with the other opacity fixes above.
-        mainView.setBackground(ColorScheme.DARK_GRAY_COLOR);
-        mainView.add(propertiesPanel);
-        mainView.add(Box.createVerticalStrut(8));
-        mainView.add(buildCombatStatsSection());
-        mainView.add(Box.createVerticalStrut(8));
-        mainView.add(itemSourcesPanel);
-        mainView.add(Box.createVerticalStrut(8));
-        mainView.add(descriptionPanel);
+        descriptionPanel = cardFilling(descriptionHeaderLabel, "Description", descriptionContent);
+
+        tabContent.put(TAB_STATS, propertiesPanel);
+        tabContent.put(TAB_COMBAT, buildCombatStatsSection());
+        tabContent.put(TAB_SOURCES, itemSourcesPanel);
+        tabContent.put(TAB_INFO, descriptionPanel);
+
+        tabBar = new JPanel();
+        tabBar.setOpaque(false);
+        tabBar.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        contentHolder = new JPanel(new BorderLayout());
+        contentHolder.setOpaque(false);
+
+        mainView = new JPanel(new BorderLayout(0, 8));
+        mainView.setOpaque(false);
+        mainView.add(tabBar, BorderLayout.NORTH);
+        mainView.add(contentHolder, BorderLayout.CENTER);
+
+        refreshTabBar();
+        selectTab(TAB_STATS);
 
         emptyStatePanel = buildEmptyStatePanel();
+        footerPanel = buildFooter();
 
-        // Shows the empty-state message until the first item/NPC/object is actually
-        // examined, at which point ensureItemViewShown() swaps this out for the real
-        // icon/name + mainView layout (see showItem/showNonItem).
-        // Opaque with the standard RuneLite panel background, not transparent - this is
-        // the top-level container for the entire panel's content, sitting above
-        // everything else. Given propertiesPanel becoming opaque alone didn't fully
-        // resolve the ghosting bug, this ancestor is a more likely actual source, since
-        // stale pixels here would affect the whole panel, not just one section.
         viewContainer.setOpaque(true);
-        viewContainer.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        viewContainer.setBackground(BG_WARM);
         viewContainer.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         viewContainer.add(emptyStatePanel, BorderLayout.CENTER);
         add(viewContainer, BorderLayout.CENTER);
     }
 
-    /**
-     * TODO: fill in your actual repo URL - this is a placeholder until then. Used by the
-     * info row's click handler below.
-     */
-    private static final String PLUGIN_REPO_URL = "https://github.com/jake219/quick-wiki/blob/main/README.md";
-    private static final String PLUGIN_VERSION = "1.0.4";
+    @Override
+    public Dimension getPreferredScrollableViewportSize()
+    {
+        return getPreferredSize();
+    }
 
-    /**
-     * Builds the friendly placeholder shown before the user has searched anything, so the
-     * panel doesn't just look blank/broken on first open.
-     */
+    @Override
+    public int getScrollableUnitIncrement(Rectangle visibleRect, int orientation, int direction)
+    {
+        return 16;
+    }
+
+    @Override
+    public int getScrollableBlockIncrement(Rectangle visibleRect, int orientation, int direction)
+    {
+        return orientation == SwingConstants.VERTICAL ? visibleRect.height : visibleRect.width;
+    }
+
+    @Override
+    public boolean getScrollableTracksViewportWidth()
+    {
+        return true;
+    }
+
+    @Override
+    public boolean getScrollableTracksViewportHeight()
+    {
+        Container parent = getParent();
+        if (parent instanceof JViewport)
+        {
+            return parent.getHeight() > getPreferredSize().height;
+        }
+        return false;
+    }
+
+    @Override
+    public Dimension getPreferredSize()
+    {
+        Dimension size = super.getPreferredSize();
+        Container c = getParent();
+        while (c != null && !(c instanceof JViewport))
+        {
+            c = c.getParent();
+        }
+        if (c != null && c.getHeight() > size.height)
+        {
+            return new Dimension(size.width, c.getHeight());
+        }
+        return size;
+    }
+
+    private static final String PLUGIN_REPO_URL = "https://github.com/jake219/quick-wiki/blob/main/README.md";
+    private static final String PLUGIN_VERSION = "2.0.1";
+
     private JPanel buildEmptyStatePanel()
     {
         JLabel title = new JLabel("Quick Wiki");
@@ -502,6 +562,11 @@ public class ItemInfoPanel extends PluginPanel
         body.setAlignmentX(Component.CENTER_ALIGNMENT);
         body.setHorizontalAlignment(SwingConstants.CENTER);
 
+        JComponent openWiki = footerButton("Open Wiki  ↗", false,
+                () -> openInBrowser("https://oldschool.runescape.wiki/"));
+        openWiki.setAlignmentX(Component.CENTER_ALIGNMENT);
+        openWiki.setMaximumSize(new Dimension(230, 40));
+
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setOpaque(false);
@@ -511,23 +576,20 @@ public class ItemInfoPanel extends PluginPanel
         panel.add(version);
         panel.add(Box.createVerticalStrut(10));
         panel.add(body);
-        panel.add(Box.createVerticalStrut(20));
+        panel.add(Box.createVerticalStrut(18));
+        panel.add(openWiki);
+        panel.add(Box.createVerticalStrut(18));
         panel.add(buildSupportRow());
         return panel;
     }
 
-    /**
-     * A second clickable row right below "View on GitHub", same style, linking to the same
-     * repo - lets users report bugs/request features, or support the developer if they'd
-     * like to, all via the one link the developer already maintains.
-     */
     private JPanel buildSupportRow()
     {
         JLabel icon = new JLabel(createInfoIcon(NEUTRAL));
         icon.setAlignmentX(Component.LEFT_ALIGNMENT);
         icon.setVerticalAlignment(SwingConstants.TOP);
 
-        Font textFont = new Font("Segoe UI", Font.PLAIN, 11);
+        Font textFont = FontManager.getRunescapeFont();
         JLabel text = new JLabel("<html>" + wrapTextManually("Report Issues or Support the Developer", 160, textFont) + "</html>");
         text.setFont(textFont);
         text.setForeground(NEUTRAL);
@@ -579,11 +641,230 @@ public class ItemInfoPanel extends PluginPanel
         return row;
     }
 
-    /**
-     * Opens a URL in the system's default browser. Logged rather than thrown if it fails
-     * (e.g. no browser support in a given environment) - this is a non-critical convenience
-     * action, not something that should ever disrupt the rest of the panel.
-     */
+    private JPanel buildFooter()
+    {
+        JPanel footer = new JPanel(new BorderLayout(6, 0));
+        footer.setOpaque(false);
+        footer.setBorder(BorderFactory.createEmptyBorder(8, 4, 2, 4));
+        footer.add(homeFooterButton(), BorderLayout.WEST);
+        footer.add(footerButton("Open Wiki  ↗", false,
+                () -> {
+                    if (currentWikiPageName != null)
+                    {
+                        openInBrowser(officialWikiUrl(currentWikiPageName));
+                    }
+                }), BorderLayout.CENTER);
+        footer.setVisible(false);
+        return footer;
+    }
+
+    private JComponent homeFooterButton()
+    {
+        RoundedPanel button = new RoundedPanel(new Color(52, 45, 33), CARD_BORDER, 8);
+        button.setLayout(new BorderLayout());
+        button.setBorder(BorderFactory.createEmptyBorder(7, 11, 7, 11));
+        button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        button.setToolTipText("Back to the Quick Wiki menu");
+
+        JLabel label = new JLabel(createHomeIcon(GOLD));
+        button.add(label, BorderLayout.CENTER);
+
+        button.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                showHome();
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                label.setIcon(createHomeIcon(GOLD_HOVER));
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                label.setIcon(createHomeIcon(GOLD));
+            }
+        });
+        return button;
+    }
+
+    private Icon createHomeIcon(Color color)
+    {
+        final int size = 15;
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(color);
+
+                Polygon roof = new Polygon();
+                roof.addPoint(x + size / 2, y + 1);
+                roof.addPoint(x + 1, y + 7);
+                roof.addPoint(x + size - 1, y + 7);
+                g2.fillPolygon(roof);
+
+                g2.fillRect(x + 3, y + 7, size - 6, size - 8);
+
+                g2.setColor(color.darker().darker());
+                g2.fillRect(x + size / 2 - 1, y + 10, 3, size - 11);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return size;
+            }
+        };
+    }
+
+    private JComponent footerButton(String text, boolean compact, Runnable onClick)
+    {
+        RoundedPanel button = new RoundedPanel(new Color(52, 45, 33), CARD_BORDER, 8);
+        button.setLayout(new BorderLayout());
+        button.setBorder(BorderFactory.createEmptyBorder(7, compact ? 10 : 12, 7, compact ? 10 : 12));
+        button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+        JLabel label = new JLabel(text, SwingConstants.CENTER);
+        label.setFont(FontManager.getRunescapeBoldFont());
+        label.setForeground(GOLD);
+        button.add(label, BorderLayout.CENTER);
+
+        button.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                onClick.run();
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                label.setForeground(GOLD_HOVER);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                label.setForeground(GOLD);
+            }
+        });
+        return button;
+    }
+
+    private JPanel buildGraphRangeBar()
+    {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+        bar.setOpaque(false);
+        for (String r : GRAPH_RANGES)
+        {
+            JLabel b = makeRangeButton(r);
+            rangeButtons.put(r, b);
+            bar.add(b);
+        }
+        styleRangeButtons();
+        return bar;
+    }
+
+    private JLabel makeRangeButton(String range)
+    {
+        JLabel b = new JLabel(range, SwingConstants.CENTER);
+        b.setFont(FontManager.getRunescapeSmallFont());
+        b.setBorder(BorderFactory.createEmptyBorder(1, 5, 1, 5));
+        b.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        b.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                setGraphRange(range);
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                if (!range.equals(graphRange))
+                {
+                    b.setForeground(GOLD_HOVER);
+                }
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                styleRangeButtons();
+            }
+        });
+        return b;
+    }
+
+    private void styleRangeButtons()
+    {
+        for (java.util.Map.Entry<String, JLabel> e : rangeButtons.entrySet())
+        {
+            boolean active = e.getKey().equals(graphRange);
+            e.getValue().setForeground(active ? ORANGE : TAB_INACTIVE_FG);
+        }
+    }
+
+    public String getGraphRange()
+    {
+        return graphRange;
+    }
+
+    public void setGraphRangeListener(Runnable listener)
+    {
+        this.graphRangeListener = listener;
+    }
+
+    private void setGraphRange(String range)
+    {
+        if (range == null || range.equals(graphRange))
+        {
+            return;
+        }
+        graphRange = range;
+        styleRangeButtons();
+        if (graphTitle != null)
+        {
+            graphTitle.setText(graphRangeTitle(range));
+        }
+        if (graphRangeListener != null)
+        {
+            graphRangeListener.run();
+        }
+    }
+
+    private String graphRangeTitle(String range)
+    {
+        switch (range)
+        {
+            case "1D":
+                return "PAST DAY";
+            case "1W":
+                return "PAST WEEK";
+            case "1Y":
+                return "PAST YEAR";
+            case "1M":
+            default:
+                return "PAST MONTH";
+        }
+    }
+
     private void openInBrowser(String url)
     {
         try
@@ -599,12 +880,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Builds the real, official OSRS Wiki page URL for a given page name - standard
-     * MediaWiki convention (spaces become underscores in the path). Falls back to an
-     * unencoded URL if UTF-8 encoding somehow isn't available, rather than failing to
-     * open anything at all.
-     */
     private String officialWikiUrl(String pageName)
     {
         String withUnderscores = pageName.replace(' ', '_');
@@ -618,23 +893,72 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called by the plugin whenever an item/NPC/object is displayed, with the exact
-     * resolved wiki page name (same name already used for fetchDescription/fetchInfobox
-     * etc.) - lets the top-right "Wiki" button open that exact page on the real,
-     * official wiki, for users who want the full page rather than just this panel's
-     * summary. Pass null to hide the button entirely (e.g. before anything's been
-     * searched yet).
-     */
     public void setWikiPageName(String pageName)
     {
         this.currentWikiPageName = pageName;
         wikiLinkLabel.setVisible(pageName != null);
+        if (footerPanel != null)
+        {
+            footerPanel.setVisible(pageName != null);
+        }
     }
 
-    /**
-     * Small "i" info-circle icon for the GitHub/info row.
-     */
+    public void setMarket(ItemInfoClient.Market m)
+    {
+        java.util.List<Integer> prices = m != null ? m.prices : null;
+        java.util.List<Long> timestamps = m != null ? m.timestamps : null;
+        boolean hasData = prices != null && prices.size() >= 2;
+
+        sparkline.setData(hasData ? prices : null, hasData ? timestamps : null);
+        priceGraphPanel.setVisible(hasData);
+
+        java.util.List<Ticker.Seg> segs = new ArrayList<>();
+        if (m != null)
+        {
+            addChangeSeg(segs, "1D", m.change1D);
+            addChangeSeg(segs, "1W", m.change1W);
+            addChangeSeg(segs, "1M", m.change1M);
+            addChangeSeg(segs, "1Y", m.change1Y);
+        }
+        if (!segs.isEmpty())
+        {
+            priceTicker.setSegments(segs);
+            priceTicker.setVisible(true);
+        }
+        else
+        {
+            priceTicker.setSegments(null);
+            priceTicker.setVisible(false);
+        }
+
+        if (pendingPrice <= 0 && m != null)
+        {
+            Integer p = (m.instaBuy != null && m.instaSell != null)
+                    ? Math.max(m.instaBuy, m.instaSell)
+                    : (m.instaBuy != null ? m.instaBuy : m.instaSell);
+            if (p != null)
+            {
+                priceSubLabel.setIcon(coinIcon());
+                priceSubLabel.setIconTextGap(5);
+                priceSubLabel.setText(formatPrice(p) + " gp");
+            }
+        }
+
+        revalidate();
+        repaint();
+    }
+
+    private void addChangeSeg(java.util.List<Ticker.Seg> segs, String label, Double pct)
+    {
+        if (pct != null)
+        {
+            Ticker.Seg s = new Ticker.Seg();
+            s.label = label;
+            s.pct = pct;
+            segs.add(s);
+        }
+    }
+
     private Icon createInfoIcon(Color color)
     {
         final int size = 14;
@@ -667,10 +991,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Swaps the empty-state placeholder out for the real icon/name + mainView layout, the
-     * first time an item/NPC/object is actually examined. A no-op on every call after that.
-     */
     private void ensureItemViewShown()
     {
         if (!hasShownFirstItem)
@@ -679,112 +999,52 @@ public class ItemInfoPanel extends PluginPanel
             viewContainer.removeAll();
             viewContainer.add(iconNamePanel, BorderLayout.NORTH);
             viewContainer.add(mainView, BorderLayout.CENTER);
+            viewContainer.add(footerPanel, BorderLayout.SOUTH);
             revalidate();
             repaint();
         }
     }
 
-    /**
-     * Sets up the lazy loader for Combat Stats, called once per item (even non-equipable
-     * ones - the accordion is always present, and shows "No combat stats available" if
-     * the fetch comes back empty, rather than needing to know in advance whether an item
-     * has bonuses). This replaced an earlier button-based design that dynamically added
-     * and removed itself from propertiesPanel and caused a persistent visual ghosting
-     * bug - reusing this panel's existing accordion pattern (the same one Item Sources
-     * and Description already use) sidesteps that problem entirely.
-     *
-     * @param loader fetches combat bonuses and calls displayCombatBonuses() once ready -
-     *               lazy, only runs the first time the button is actually clicked for this
-     *               item, matching the same lazy-load pattern as Item Sources.
-     */
+    public void showHome()
+    {
+        hasShownFirstItem = false;
+        setBackButtonVisible(false);
+        viewContainer.removeAll();
+        viewContainer.add(emptyStatePanel, BorderLayout.CENTER);
+        revalidate();
+        repaint();
+        scrollToTop();
+    }
+
     public void setCombatStatsAvailable(Runnable loader)
     {
         combatStatsLoader = loader;
         combatStatsRequested = false;
         combatStatsContent.removeAll();
-        if (combatStatsExpanded)
+
+        if (TAB_COMBAT.equals(currentTab) && combatTabVisible)
         {
-            if (loader != null)
-            {
-                combatStatsContent.add(makeSourcesInfoLabel("Loading..."));
-                combatStatsRequested = true;
-                loader.run();
-            }
-            else
-            {
-                // Confirmed via a real report: switching from an item with bonuses
-                // (accordion expanded) to one without left "Loading..." stuck on screen
-                // forever, since there was no loader left to ever replace it. We already
-                // know upfront there's nothing to fetch, so show the real empty state
-                // immediately instead.
-                JLabel noCombatStatsLabel = makeSourcesInfoLabel("No combat stats available.");
-                noCombatStatsLabel.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
-                combatStatsContent.add(noCombatStatsLabel);
-            }
+            ensureCombatLoaded();
         }
         revalidate();
         repaint();
     }
 
-    private void toggleCombatStats()
-    {
-        combatStatsExpanded = !combatStatsExpanded;
-        updateAccordionHeader(combatStatsHeaderLabel, "Combat Stats", combatStatsExpanded, combatStatsHovering);
-        combatStatsContent.setVisible(combatStatsExpanded);
-
-        if (combatStatsExpanded && !combatStatsRequested)
-        {
-            combatStatsRequested = true;
-            combatStatsContent.removeAll();
-            if (combatStatsLoader != null)
-            {
-                combatStatsContent.add(makeSourcesInfoLabel("Loading..."));
-                combatStatsLoader.run();
-            }
-            else
-            {
-                // Same fix as setCombatStatsAvailable's null-loader case - if this item
-                // was set up while the accordion was collapsed (so no content was
-                // populated then), expanding it now would otherwise show a blank area
-                // instead of the real empty state.
-                JLabel noCombatStatsLabel = makeSourcesInfoLabel("No combat stats available.");
-                noCombatStatsLabel.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
-                combatStatsContent.add(noCombatStatsLabel);
-            }
-        }
-
-        revalidate();
-        repaint();
-    }
-
-    /**
-     * Shows or hides the whole "Combat Stats" accordion entirely - used to hide it for
-     * Objects, which have no combat stats at all (unlike items/NPCs, where an
-     * always-empty "No combat stats available" state can still legitimately apply to some
-     * of them). Same pattern as setShopsSectionVisible above, for the same reason: a
-     * section that structurally can't ever apply to a category shouldn't be shown as an
-     * always-empty toggle for it.
-     */
     public void setCombatStatsSectionVisible(boolean visible)
     {
-        combatStatsHeaderLabel.setVisible(visible);
-        combatStatsContent.setVisible(visible && combatStatsExpanded);
+        combatTabVisible = visible;
+        refreshTabBar();
+
+        if (!visible && TAB_COMBAT.equals(currentTab))
+        {
+            selectTab(TAB_STATS);
+        }
         revalidate();
         repaint();
     }
 
-    /**
-     * Builds the Combat Stats accordion section once at construction, following the same
-     * structure as Description (header + content, added once to mainView and never
-     * removed) rather than a separate swap-to view. Three sections (Attack/Defence/Other
-     * bonuses) each laid out as a row of icon-over-value cells, matching the wiki's own
-     * Combat stats table structure as closely as reasonably fits this panel's width.
-     */
     private JPanel buildCombatStatsSection()
     {
-        wireAccordionHeader(combatStatsHeaderLabel, () -> "Combat Stats", () -> combatStatsExpanded,
-                () -> combatStatsHovering, hovering -> combatStatsHovering = hovering, this::toggleCombatStats);
-
         attackBonusRow.setOpaque(false);
         attackBonusRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         attackBonusRow2.setOpaque(false);
@@ -813,47 +1073,35 @@ public class ItemInfoPanel extends PluginPanel
         combatStatsContent.setLayout(new BoxLayout(combatStatsContent, BoxLayout.Y_AXIS));
         combatStatsContent.setOpaque(false);
         combatStatsContent.setAlignmentX(Component.LEFT_ALIGNMENT);
-        combatStatsContent.setVisible(false);
+        combatStatsContent.setVisible(true);
 
-        JPanel section = new JPanel();
-        section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
-        section.setOpaque(false);
-        section.setAlignmentX(Component.LEFT_ALIGNMENT);
-        section.add(combatStatsHeaderLabel);
-        section.add(Box.createVerticalStrut(6));
-        section.add(combatStatsContent);
+        combatScrollPane = new JScrollPane(combatStatsContent);
+        combatScrollPane.setOpaque(false);
+        combatScrollPane.getViewport().setOpaque(false);
+        combatScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        combatScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        combatScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        combatScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        enableScrollChaining(combatScrollPane);
+        combatScrollPane.setAlignmentX(Component.LEFT_ALIGNMENT);
+        combatScrollPane.setPreferredSize(new Dimension(10, 90));
+        combatScrollPane.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 
-        return section;
+        return cardFilling(combatStatsHeaderLabel, "Combat Stats", combatScrollPane);
     }
 
     private JLabel makeSectionLabel(String text)
     {
         JLabel label = new JLabel(text);
-        label.setFont(FontManager.getRunescapeBoldFont().deriveFont(15f));
+        label.setFont(FontManager.getRunescapeBoldFont().deriveFont(16f));
         label.setForeground(GOLD);
         label.setAlignmentX(Component.LEFT_ALIGNMENT);
         return label;
     }
 
-    /**
-     * Populates the three bonus rows with real values and icons - called once the
-     * plugin's combat stats loader finishes fetching. Positive bonuses show in green,
-     * negative in red, zero in neutral grey, matching how the rest of this panel colors
-     * good/bad/neutral values (e.g. yesNoColor for boolean properties).
-     *
-     * @param skillIcons keyed by lowercase Skill enum name ("attack", "strength",
-     *                   "defence", "ranged", "magic", "prayer") - built by the plugin via
-     *                   skillIconManager.getSkillImage(), reusing the exact same mechanism
-     *                   already used for drop-type icons elsewhere in this plugin.
-     */
     public void displayCombatBonuses(ItemInfoClient.CombatBonuses bonuses, Map<String, BufferedImage> skillIcons)
     {
         combatStatsContent.removeAll();
-        attackBonusRow.removeAll();
-        attackBonusRow2.removeAll();
-        defenceBonusRow.removeAll();
-        defenceBonusRow2.removeAll();
-        otherBonusRow.removeAll();
 
         if (bonuses == null)
         {
@@ -863,77 +1111,60 @@ public class ItemInfoPanel extends PluginPanel
         }
         else
         {
-            // Stab/Slash/Crush share the Attack skill icon (no unique RuneLite sprite
-            // equivalent for each melee style specifically), differentiated by their text
-            // label instead of a unique icon - see the session notes on this tradeoff.
-            attackBonusRow.add(buildBonusCell("Stab", bonuses.stabAttack, skillIcons.get("attack"), false, "Increases accuracy for stab attacks"));
-            attackBonusRow.add(buildBonusCell("Slash", bonuses.slashAttack, skillIcons.get("attack"), false, "Increases accuracy for slash attacks"));
-            attackBonusRow.add(buildBonusCell("Crush", bonuses.crushAttack, skillIcons.get("attack"), false, "Increases accuracy for crush attacks"));
+            JPanel attack = grid3();
+            attack.add(buildBonusCell("Stab", bonuses.stabAttack, skillIcons.get("attack"), false, "Increases accuracy for stab attacks"));
+            attack.add(buildBonusCell("Slash", bonuses.slashAttack, skillIcons.get("attack"), false, "Increases accuracy for slash attacks"));
+            attack.add(buildBonusCell("Crush", bonuses.crushAttack, skillIcons.get("attack"), false, "Increases accuracy for crush attacks"));
+            attack.add(buildBonusCell("Magic", bonuses.magicAttack, skillIcons.get("magic"), false, "Increases accuracy for magic attacks"));
+            attack.add(buildBonusCell("Ranged", bonuses.rangeAttack, skillIcons.get("ranged"), false, "Increases accuracy for ranged attacks"));
 
-            attackBonusRow2.add(buildBonusCell("Magic", bonuses.magicAttack, skillIcons.get("magic"), false, "Increases accuracy for magic attacks"));
-            attackBonusRow2.add(buildBonusCell("Ranged", bonuses.rangeAttack, skillIcons.get("ranged"), false, "Increases accuracy for ranged attacks"));
+            JPanel defence = grid3();
+            defence.add(buildBonusCell("Stab", bonuses.stabDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by stab attacks"));
+            defence.add(buildBonusCell("Slash", bonuses.slashDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by slash attacks"));
+            defence.add(buildBonusCell("Crush", bonuses.crushDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by crush attacks"));
+            defence.add(buildBonusCell("Magic", bonuses.magicDefence, skillIcons.get("magic"), false, "Reduces chance of being hit by magic attacks"));
+            defence.add(buildBonusCell("Ranged", bonuses.rangeDefence, skillIcons.get("ranged"), false, "Reduces chance of being hit by ranged attacks"));
 
-            defenceBonusRow.add(buildBonusCell("Stab", bonuses.stabDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by stab attacks"));
-            defenceBonusRow.add(buildBonusCell("Slash", bonuses.slashDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by slash attacks"));
-            defenceBonusRow.add(buildBonusCell("Crush", bonuses.crushDefence, skillIcons.get("defence"), false, "Reduces chance of being hit by crush attacks"));
+            JPanel other = grid3();
+            other.add(buildBonusCell("Strength", bonuses.strength, skillIcons.get("strength"), false, "Increases max hit with melee weapons"));
+            other.add(buildBonusCell("Ranged Str", bonuses.rangedStrength, skillIcons.get("ranged"), false, "Increases max hit with ranged weapons"));
+            other.add(buildBonusCell("Magic Dmg", bonuses.magicDamage, skillIcons.get("magic"), true, "Increases damage dealt by magic spells"));
+            other.add(buildBonusCell("Prayer", bonuses.prayer, skillIcons.get("prayer"), false, "Increases max Prayer points while worn"));
 
-            defenceBonusRow2.add(buildBonusCell("Magic", bonuses.magicDefence, skillIcons.get("magic"), false, "Reduces chance of being hit by magic attacks"));
-            defenceBonusRow2.add(buildBonusCell("Ranged", bonuses.rangeDefence, skillIcons.get("ranged"), false, "Reduces chance of being hit by ranged attacks"));
-
-            otherBonusRow.add(buildBonusCell("Strength", bonuses.strength, skillIcons.get("strength"), false, "Increases max hit with melee weapons"));
-            otherBonusRow.add(buildBonusCell("Ranged Str", bonuses.rangedStrength, skillIcons.get("ranged"), false, "Increases max hit with ranged weapons"));
-            otherBonusRow.add(buildBonusCell("Magic Dmg", bonuses.magicDamage, skillIcons.get("magic"), true, "Increases damage dealt by magic spells"));
-            otherBonusRow.add(buildBonusCell("Prayer", bonuses.prayer, skillIcons.get("prayer"), false, "Increases max Prayer points while worn"));
-
-            combatStatsContent.add(makeSectionLabel("Attack bonuses"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(attackBonusRow);
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(attackBonusRow2);
-            combatStatsContent.add(Box.createVerticalStrut(6));
-            combatStatsContent.add(createDivider());
-            combatStatsContent.add(Box.createVerticalStrut(6));
-
-            combatStatsContent.add(makeSectionLabel("Defence bonuses"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(defenceBonusRow);
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(defenceBonusRow2);
-            combatStatsContent.add(Box.createVerticalStrut(6));
-            combatStatsContent.add(createDivider());
-            combatStatsContent.add(Box.createVerticalStrut(6));
-
-            combatStatsContent.add(makeSectionLabel("Other bonuses"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(otherBonusRow);
+            addCombatSection("Attack bonuses", attack);
+            addCombatSection("Defence bonuses", defence);
+            addCombatSection("Other bonuses", other);
         }
 
         revalidate();
         repaint();
     }
 
-    /**
-     * NPC version of displayCombatBonuses - matches the wiki's own section structure as
-     * closely as this panel's width allows: "Combat stats" (6 base levels, including HP,
-     * which items don't have), "Aggressive stats" (6 attack-side bonuses - items call this
-     * "Attack bonuses", but the wiki's own NPC infobox specifically labels this section
-     * "Aggressive stats"), and three separate defence sections (Melee/Magic/Ranged) rather
-     * than one combined row - items combine all 5 into one "Defence bonuses" row since
-     * items only have a single value per style, but the wiki keeps these as visually
-     * distinct sections for monsters too, so this mirrors that rather than the item
-     * layout. A previous version of this only showed 5 of 6 Combat stats icons and 3 of 6
-     * Aggressive stats icons - a real gap, not just a labeling change.
-     */
+    private JPanel grid3()
+    {
+        JPanel p = new JPanel(new GridLayout(0, 3, 6, 8));
+        p.setOpaque(false);
+        p.setAlignmentX(Component.LEFT_ALIGNMENT);
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        return p;
+    }
+
+    private void addCombatSection(String title, JPanel grid)
+    {
+        if (combatStatsContent.getComponentCount() > 0)
+        {
+            combatStatsContent.add(Box.createVerticalStrut(8));
+            combatStatsContent.add(createDivider());
+            combatStatsContent.add(Box.createVerticalStrut(8));
+        }
+        combatStatsContent.add(makeSectionLabel(title));
+        combatStatsContent.add(Box.createVerticalStrut(5));
+        combatStatsContent.add(grid);
+    }
+
     public void displayNpcCombatStats(ItemInfoClient.NpcCombatStats stats, Map<String, BufferedImage> skillIcons)
     {
         combatStatsContent.removeAll();
-        npcLevelsRow.removeAll();
-        npcLevelsRow2.removeAll();
-        npcAttackRow.removeAll();
-        npcAttackRow2.removeAll();
-        npcMeleeDefenceRow.removeAll();
-        npcMagicDefenceRow.removeAll();
-        npcRangedDefenceRow.removeAll();
 
         if (stats == null)
         {
@@ -943,100 +1174,56 @@ public class ItemInfoPanel extends PluginPanel
         }
         else
         {
-            npcLevelsRow.add(buildLevelCell("HP", stats.hitpoints, skillIcons.get("hitpoints"), "Hitpoints - how much damage this monster can take before dying"));
-            npcLevelsRow.add(buildLevelCell("Attack", stats.attackLevel, skillIcons.get("attack"), "Attack level - affects this monster's melee accuracy"));
-            npcLevelsRow.add(buildLevelCell("Strength", stats.strengthLevel, skillIcons.get("strength"), "Strength level - affects this monster's melee max hit"));
+            JPanel levels = grid3();
+            levels.add(buildLevelCell("HP", stats.hitpoints, skillIcons.get("hitpoints"), "Hitpoints - how much damage this monster can take before dying"));
+            levels.add(buildLevelCell("Attack", stats.attackLevel, skillIcons.get("attack"), "Attack level - affects this monster's melee accuracy"));
+            levels.add(buildLevelCell("Strength", stats.strengthLevel, skillIcons.get("strength"), "Strength level - affects this monster's melee max hit"));
+            levels.add(buildLevelCell("Defence", stats.defenceLevel, skillIcons.get("defence"), "Defence level - affects how often this monster is hit"));
+            levels.add(buildLevelCell("Magic", stats.magicLevel, skillIcons.get("magic"), "Magic level - affects this monster's magic accuracy and max hit"));
+            levels.add(buildLevelCell("Ranged", stats.rangedLevel, skillIcons.get("ranged"), "Ranged level - affects this monster's ranged accuracy and max hit"));
 
-            npcLevelsRow2.add(buildLevelCell("Defence", stats.defenceLevel, skillIcons.get("defence"), "Defence level - affects how often this monster is hit"));
-            npcLevelsRow2.add(buildLevelCell("Magic", stats.magicLevel, skillIcons.get("magic"), "Magic level - affects this monster's magic accuracy and max hit"));
-            npcLevelsRow2.add(buildLevelCell("Ranged", stats.rangedLevel, skillIcons.get("ranged"), "Ranged level - affects this monster's ranged accuracy and max hit"));
+            JPanel aggressive = grid3();
+            aggressive.add(buildBonusCell("Attack", stats.attackBonus, skillIcons.get("attack"), false, "Increases this monster's melee accuracy"));
+            aggressive.add(buildBonusCell("Strength", stats.strengthBonus, skillIcons.get("strength"), false, "Increases this monster's melee max hit"));
+            aggressive.add(buildBonusCell("Magic", stats.magicAttackBonus, skillIcons.get("magic"), false, "Increases this monster's magic accuracy"));
+            aggressive.add(buildBonusCell("Magic Dmg", stats.magicDamageBonus, skillIcons.get("magic"), true, "Increases this monster's magic max hit"));
+            aggressive.add(buildBonusCell("Ranged", stats.rangeAttackBonus, skillIcons.get("ranged"), false, "Increases this monster's ranged accuracy"));
+            aggressive.add(buildBonusCell("Ranged Str", stats.rangedStrengthBonus, skillIcons.get("ranged"), false, "Increases this monster's ranged max hit"));
 
-            npcAttackRow.add(buildBonusCell("Attack", stats.attackBonus, skillIcons.get("attack"), false, "Increases this monster's melee accuracy"));
-            npcAttackRow.add(buildBonusCell("Strength", stats.strengthBonus, skillIcons.get("strength"), false, "Increases this monster's melee max hit"));
-            npcAttackRow.add(buildBonusCell("Magic", stats.magicAttackBonus, skillIcons.get("magic"), false, "Increases this monster's magic accuracy"));
-
-            npcAttackRow2.add(buildBonusCell("Magic Dmg", stats.magicDamageBonus, skillIcons.get("magic"), true, "Increases this monster's magic max hit"));
-            npcAttackRow2.add(buildBonusCell("Ranged", stats.rangeAttackBonus, skillIcons.get("ranged"), false, "Increases this monster's ranged accuracy"));
-            npcAttackRow2.add(buildBonusCell("Ranged Str", stats.rangedStrengthBonus, skillIcons.get("ranged"), false, "Increases this monster's ranged max hit"));
-
-            npcMeleeDefenceRow.add(buildBonusCell("Stab", stats.stabDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by stab attacks"));
-            npcMeleeDefenceRow.add(buildBonusCell("Slash", stats.slashDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by slash attacks"));
-            npcMeleeDefenceRow.add(buildBonusCell("Crush", stats.crushDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by crush attacks"));
-
-            npcMagicDefenceRow.add(buildBonusCell("Magic", stats.magicDefenceBonus, skillIcons.get("magic"), false, "Reduces chance of being hit by magic attacks"));
+            JPanel melee = grid3();
+            melee.add(buildBonusCell("Stab", stats.stabDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by stab attacks"));
+            melee.add(buildBonusCell("Slash", stats.slashDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by slash attacks"));
+            melee.add(buildBonusCell("Crush", stats.crushDefenceBonus, skillIcons.get("defence"), false, "Reduces chance of being hit by crush attacks"));
 
             String weaknessLabel = (stats.elementalWeaknessType == null || stats.elementalWeaknessType.trim().isEmpty())
                     ? "No Weakness"
                     : stats.elementalWeaknessType.trim().substring(0, 1).toUpperCase()
                       + stats.elementalWeaknessType.trim().substring(1).toLowerCase() + " Weakness";
-            npcMagicDefenceRow.add(buildBonusCell(weaknessLabel, stats.elementalWeaknessPercent, skillIcons.get("elemental_weakness"), true, "Extra damage taken from this element's spells"));
+            JPanel magic = grid3();
+            magic.add(buildBonusCell("Magic", stats.magicDefenceBonus, skillIcons.get("magic"), false, "Reduces chance of being hit by magic attacks"));
+            magic.add(buildBonusCell(weaknessLabel, stats.elementalWeaknessPercent, skillIcons.get("elemental_weakness"), true, "Extra damage taken from this element's spells"));
 
-            npcRangedDefenceRow.add(buildBonusCell("Light", stats.lightRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by darts and similar light ammo"));
-            npcRangedDefenceRow.add(buildBonusCell("Standard", stats.standardRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by arrows and similar standard ammo"));
-            npcRangedDefenceRow.add(buildBonusCell("Heavy", stats.heavyRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by bolts and similar heavy ammo"));
+            JPanel ranged = grid3();
+            ranged.add(buildBonusCell("Light", stats.lightRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by darts and similar light ammo"));
+            ranged.add(buildBonusCell("Standard", stats.standardRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by arrows and similar standard ammo"));
+            ranged.add(buildBonusCell("Heavy", stats.heavyRangeDefenceBonus, skillIcons.get("ranged"), false, "Reduces chance of being hit by bolts and similar heavy ammo"));
 
-            combatStatsContent.add(makeSectionLabel("Combat stats"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcLevelsRow);
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcLevelsRow2);
-            combatStatsContent.add(Box.createVerticalStrut(6));
-            combatStatsContent.add(createDivider());
-            combatStatsContent.add(Box.createVerticalStrut(6));
-
-            combatStatsContent.add(makeSectionLabel("Aggressive stats"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcAttackRow);
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcAttackRow2);
-            combatStatsContent.add(Box.createVerticalStrut(6));
-            combatStatsContent.add(createDivider());
-            combatStatsContent.add(Box.createVerticalStrut(6));
-
-            combatStatsContent.add(makeSectionLabel("Melee defence"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcMeleeDefenceRow);
-            combatStatsContent.add(Box.createVerticalStrut(6));
-            combatStatsContent.add(createDivider());
-            combatStatsContent.add(Box.createVerticalStrut(6));
-
-            combatStatsContent.add(makeSectionLabel("Magic defence"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcMagicDefenceRow);
-            combatStatsContent.add(Box.createVerticalStrut(6));
-            combatStatsContent.add(createDivider());
-            combatStatsContent.add(Box.createVerticalStrut(6));
-
-            combatStatsContent.add(makeSectionLabel("Ranged defence"));
-            combatStatsContent.add(Box.createVerticalStrut(4));
-            combatStatsContent.add(npcRangedDefenceRow);
+            addCombatSection("Combat stats", levels);
+            addCombatSection("Aggressive stats", aggressive);
+            addCombatSection("Melee defence", melee);
+            addCombatSection("Magic defence", magic);
+            addCombatSection("Ranged defence", ranged);
         }
 
         revalidate();
         repaint();
     }
 
-    /**
-     * Small icon+text row under Magic defence showing the monster's elemental weakness -
-     * matches the wiki's own placement of this info right alongside Magic defence, rather
-     * than as its own separate section, and now also matches its icon+text presentation
-     * (a rune icon, or "Pure essence" for no weakness) rather than plain text alone.
-     * "No elemental weakness" when stats.elementalWeaknessType is null/empty, otherwise
-     * "Weak to X spells (+Y%)". The icon itself is resolved by the plugin via
-     * itemManager.search (see setupNpcCombatStats) and passed in through skillIcons under
-     * the "elemental_weakness" key, same mechanism as every other icon in this panel.
-     */
     private JPanel buildBonusCell(String label, int value, BufferedImage icon)
     {
         return buildBonusCell(label, value, icon, false, null);
     }
 
-    /**
-     * Like buildBonusCell, but for plain base levels (the wiki's "Combat stats" section -
-     * HP/Attack/Strength/Defence/Magic/Ranged) rather than bonuses - no "+" prefix and
-     * always neutral coloring, since a level of 5 isn't a "good" or "bad" value the way a
-     * +5 bonus is.
-     */
     private JPanel buildLevelCell(String label, int value, BufferedImage icon, String tooltipText)
     {
         JPanel cell = new JPanel();
@@ -1058,7 +1245,7 @@ public class ItemInfoPanel extends PluginPanel
         valueLabel.setForeground(NEUTRAL);
         valueLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        Font nameFont = new Font("Segoe UI", Font.PLAIN, 11);
+        Font nameFont = FontManager.getRunescapeFont();
         JLabel nameLabel = new JLabel("<html><div style='text-align:center;'>"
                 + wrapTextManually(label, 58, nameFont) + "</div></html>");
         nameLabel.setFont(nameFont);
@@ -1066,17 +1253,12 @@ public class ItemInfoPanel extends PluginPanel
         nameLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         nameLabel.setHorizontalAlignment(SwingConstants.CENTER);
         nameLabel.setVerticalAlignment(SwingConstants.TOP);
-        // Same reserved-2-line-height alignment fix as buildBonusCell, so this row's cells
-        // line up visually with the bonus rows above/below it.
         FontMetrics nameMetrics = getFontMetrics(nameFont);
         int twoLineHeight = nameMetrics.getHeight() * 2;
         nameLabel.setPreferredSize(new Dimension(58, twoLineHeight));
         nameLabel.setMinimumSize(new Dimension(58, twoLineHeight));
         nameLabel.setMaximumSize(new Dimension(Integer.MAX_VALUE, twoLineHeight));
 
-        // Set on every sub-component, not just the cell itself - a JLabel child can
-        // otherwise intercept the mouse and show no tooltip at all rather than the
-        // parent's, depending on exactly where within the cell the cursor is.
         if (showTooltips && tooltipText != null)
         {
             cell.setToolTipText(tooltipText);
@@ -1119,7 +1301,7 @@ public class ItemInfoPanel extends PluginPanel
         valueLabel.setForeground(value > 0 ? RARITY_COMMON : (value < 0 ? RARITY_RARE : NEUTRAL));
         valueLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        Font nameFont = new Font("Segoe UI", Font.PLAIN, 11);
+        Font nameFont = FontManager.getRunescapeFont();
         JLabel nameLabel = new JLabel("<html><div style='text-align:center;'>"
                 + wrapTextManually(label, 58, nameFont) + "</div></html>");
         nameLabel.setFont(nameFont);
@@ -1127,13 +1309,6 @@ public class ItemInfoPanel extends PluginPanel
         nameLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         nameLabel.setHorizontalAlignment(SwingConstants.CENTER);
         nameLabel.setVerticalAlignment(SwingConstants.TOP);
-        // Reserves room for 2 lines always, regardless of whether this particular label
-        // actually needs 1 or 2 lines - without this, a cell with a short single-line
-        // label (e.g. "Strength") ends up shorter overall than one with a wrapped
-        // two-line label (e.g. "Magic Dmg"), and centering each cell's content
-        // independently (an earlier, wrong fix) shifted icons out of alignment with each
-        // other instead of fixing it. A uniform reserved height keeps every cell's
-        // internal structure identical, so icon+value naturally align across the row.
         FontMetrics nameMetrics = getFontMetrics(nameFont);
         int twoLineHeight = nameMetrics.getHeight() * 2;
         nameLabel.setPreferredSize(new Dimension(58, twoLineHeight));
@@ -1156,10 +1331,6 @@ public class ItemInfoPanel extends PluginPanel
         return cell;
     }
 
-    /**
-     * A thin horizontal rule used to separate accordion sections, matching the reference
-     * style's divider lines instead of wrapping each section in its own bordered card.
-     */
     private JComponent createDivider()
     {
         JPanel divider = new JPanel();
@@ -1170,93 +1341,709 @@ public class ItemInfoPanel extends PluginPanel
         return divider;
     }
 
-    /**
-     * Builds the Item Sources section: a flat header (matching Properties/Description) that
-     * expands to reveal two further nested dropdown rows, Drops and Shops, each independently
-     * collapsible - directly mirroring the reference's nested "Sources > Drops / Shops"
-     * structure rather than navigating to a separate page.
-     */
     private JPanel buildItemSourcesSection()
     {
-        wireAccordionHeader(itemSourcesHeaderLabel, () -> npcDropsMode ? singleSectionLabel : "Item sources", () -> itemSourcesExpanded,
-                () -> itemSourcesHovering, hovering -> itemSourcesHovering = hovering, this::toggleItemSources);
-
-        wireAccordionHeader(dropsHeaderLabel, () -> "Drops", () -> dropsExpanded,
-                () -> dropsHovering, hovering -> dropsHovering = hovering, this::toggleDrops);
-
-        wireAccordionHeader(shopsHeaderLabel, () -> "Shops", () -> shopsExpanded,
-                () -> shopsHovering, hovering -> shopsHovering = hovering, this::toggleShops);
-
         dropsContent = new JPanel();
         dropsContent.setLayout(new BoxLayout(dropsContent, BoxLayout.Y_AXIS));
         dropsContent.setOpaque(false);
         dropsContent.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-        // Wrapping in a JScrollPane with a capped height means the Drops header (added to
-        // "nested" below, outside this scrollpane) stays fixed in place while you scroll
-        // through a long drop list, instead of scrolling away with the rest of the page -
-        // the list scrolls internally within its own confined area. setSources() resizes
-        // this dynamically up to SOURCES_MAX_HEIGHT based on the actual row count, so short
-        // lists aren't padded with empty scroll space.
-        dropsScrollPane = new JScrollPane(dropsContent);
-        dropsScrollPane.setOpaque(false);
-        dropsScrollPane.getViewport().setOpaque(false);
-        dropsScrollPane.setBorder(BorderFactory.createEmptyBorder());
-        dropsScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        dropsScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
-        dropsScrollPane.getVerticalScrollBar().setUnitIncrement(16);
-        enableScrollChaining(dropsScrollPane);
-        dropsScrollPane.setAlignmentX(Component.LEFT_ALIGNMENT);
-        dropsScrollPane.setVisible(false);
 
         shopsContent = new JPanel();
         shopsContent.setLayout(new BoxLayout(shopsContent, BoxLayout.Y_AXIS));
         shopsContent.setOpaque(false);
         shopsContent.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        // Same fixed-height/internal-scroll treatment as Drops - the Shops header stays
-        // fixed above this scrollpane while a long shop list scrolls within its own
-        // confined area, capped and sized dynamically in setSources().
-        shopsScrollPane = new JScrollPane(shopsContent);
-        shopsScrollPane.setOpaque(false);
-        shopsScrollPane.getViewport().setOpaque(false);
-        shopsScrollPane.setBorder(BorderFactory.createEmptyBorder());
-        shopsScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        shopsScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
-        shopsScrollPane.getVerticalScrollBar().setUnitIncrement(16);
-        enableScrollChaining(shopsScrollPane);
-        shopsScrollPane.setAlignmentX(Component.LEFT_ALIGNMENT);
-        shopsScrollPane.setVisible(false);
+        materialsContent = new WidthTrackingPanel();
+        materialsContent.setLayout(new BoxLayout(materialsContent, BoxLayout.Y_AXIS));
+        materialsContent.setOpaque(false);
+        materialsContent.setAlignmentX(Component.LEFT_ALIGNMENT);
+        materialsContent.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 6));
 
-        // Nested rows get a small left indent so the Drops/Shops hierarchy under Item
-        // Sources reads clearly, matching the reference's indented sub-items.
-        JPanel nested = new JPanel();
-        nested.setLayout(new BoxLayout(nested, BoxLayout.Y_AXIS));
-        nested.setOpaque(false);
-        nested.setAlignmentX(Component.LEFT_ALIGNMENT);
-        nested.setBorder(BorderFactory.createEmptyBorder(0, 14, 0, 0));
-        nested.add(dropsHeaderLabel);
-        nested.add(Box.createVerticalStrut(4));
-        nested.add(dropsScrollPane);
-        nested.add(Box.createVerticalStrut(8));
-        nested.add(shopsHeaderLabel);
-        nested.add(Box.createVerticalStrut(4));
-        nested.add(shopsScrollPane);
-        nested.setVisible(false);
-        itemSourcesContent = nested;
+        // The three sections SHARE the panel height. The stack is sized to the viewport, and the
+        // EqualShareLayout splits that height into equal parts - so when all three are full they
+        // each get a third and scroll internally, with no outer scrollbar. A section that needs
+        // less than its share just takes what it needs and hands the surplus back to the others,
+        // so short sections aren't stretched into blank boxes and leftover space falls to the
+        // bottom.
+        JScrollPane materialsScroll = makeSourcesScroll(materialsContent);
+        JScrollPane dropsScroll = makeSourcesScroll(dropsContent);
+        JScrollPane shopsScroll = makeSourcesScroll(shopsContent);
 
-        JPanel section = new JPanel();
-        section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
+        materialsCard = buildCollapsibleCard(materialsHeaderLabel, "Creation", materialsScroll);
+        dropsCard = buildCollapsibleCard(dropsHeaderLabel, "Drops", dropsScroll);
+        shopsCard = buildCollapsibleCard(shopsHeaderLabel, "Shops", shopsScroll);
+        materialsCard.setVisible(false);
+
+        SharedHeightPanel stack = new SharedHeightPanel();
+        stack.setLayout(new EqualShareLayout(10));
+        stack.setOpaque(false);
+        stack.setAlignmentX(Component.LEFT_ALIGNMENT);
+        stack.add(materialsCard);
+        stack.add(dropsCard);
+        stack.add(shopsCard);
+
+        sourcesScrollPane = new JScrollPane(stack);
+        sourcesScrollPane.setOpaque(false);
+        sourcesScrollPane.getViewport().setOpaque(false);
+        sourcesScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        sourcesScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        sourcesScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        sourcesScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        enableScrollChaining(sourcesScrollPane);
+        sourcesScrollPane.setPreferredSize(new Dimension(10, 120));
+
+        JPanel section = new JPanel(new BorderLayout());
         section.setOpaque(false);
-        section.setAlignmentX(Component.LEFT_ALIGNMENT);
-        section.add(itemSourcesHeaderLabel);
-        section.add(Box.createVerticalStrut(6));
-        section.add(itemSourcesContent);
-        section.add(Box.createVerticalStrut(8));
-        section.add(createDivider());
-        section.setVisible(false);
-
+        section.add(sourcesScrollPane, BorderLayout.CENTER);
         return section;
+    }
+
+    private JScrollPane makeSourcesScroll(JComponent content)
+    {
+        JScrollPane sp = new JScrollPane(content);
+        sp.setOpaque(false);
+        sp.getViewport().setOpaque(false);
+        sp.setBorder(BorderFactory.createEmptyBorder());
+        sp.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        sp.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        sp.getVerticalScrollBar().setUnitIncrement(16);
+        // Small minimum so the card can shrink and this pane scrolls its overflow internally.
+        sp.setMinimumSize(new Dimension(10, 10));
+        enableScrollChaining(sp);
+        sp.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return sp;
+    }
+
+    public void setMaterialClickListener(java.util.function.Consumer<String> listener)
+    {
+        this.materialClickListener = listener;
+    }
+
+    public void setFacilityIcon(BufferedImage icon)
+    {
+        this.facilityIcon = icon;
+    }
+
+    public void setCreation(List<ItemInfoClient.RecipeData> recipes)
+    {
+        materialsContent.removeAll();
+        materialIconLabels.clear();
+
+        List<ItemInfoClient.RecipeData> methods = new ArrayList<>();
+        if (recipes != null)
+        {
+            for (ItemInfoClient.RecipeData r : recipes)
+            {
+                if (r == null)
+                {
+                    continue;
+                }
+                boolean any = (r.materials != null && !r.materials.isEmpty())
+                        || (r.requirements != null && !r.requirements.isEmpty())
+                        || (r.facility != null && !r.facility.isEmpty());
+                if (any)
+                {
+                    methods.add(r);
+                }
+            }
+        }
+
+        if (methods.isEmpty())
+        {
+            materialsCard.setVisible(false);
+            materialsContent.revalidate();
+            materialsContent.repaint();
+            return;
+        }
+
+        boolean multiple = methods.size() > 1;
+        for (int i = 0; i < methods.size(); i++)
+        {
+            ItemInfoClient.RecipeData method = methods.get(i);
+            if (multiple)
+            {
+                if (i > 0)
+                {
+                    materialsContent.add(Box.createVerticalStrut(8));
+                }
+                String header = method.name != null && !method.name.isEmpty()
+                        ? method.name
+                        : "Method " + (i + 1);
+                materialsContent.add(buildMethodBox(header, method));
+            }
+            else
+            {
+                addMethodRows(materialsContent, method);
+            }
+        }
+
+        materialsCard.setVisible(true);
+        materialsContent.revalidate();
+        materialsContent.repaint();
+        revalidate();
+        repaint();
+    }
+
+    private JPanel buildMethodBox(String title, ItemInfoClient.RecipeData method)
+    {
+        RoundedPanel box = new RoundedPanel(METHOD_BG, CARD_BORDER, 8);
+        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
+        box.setAlignmentX(Component.LEFT_ALIGNMENT);
+        box.setBorder(BorderFactory.createEmptyBorder(8, 10, 8, 10));
+
+        JLabel header = new JLabel(title);
+        header.setFont(FontManager.getRunescapeBoldFont());
+        header.setForeground(ORANGE);
+        header.setAlignmentX(Component.LEFT_ALIGNMENT);
+        header.setMaximumSize(new Dimension(Integer.MAX_VALUE, header.getPreferredSize().height));
+        box.add(header);
+        box.add(Box.createVerticalStrut(6));
+
+        addMethodRows(box, method);
+
+        box.setMaximumSize(new Dimension(Integer.MAX_VALUE, box.getPreferredSize().height));
+        return box;
+    }
+
+    private void addMethodRows(JPanel target, ItemInfoClient.RecipeData method)
+    {
+        boolean hasReqs = method.requirements != null && !method.requirements.isEmpty();
+        boolean headerIsFacility = method.name != null && method.facility != null
+                && method.name.equalsIgnoreCase(method.facility);
+        boolean hasFacility = method.facility != null && !method.facility.isEmpty() && !headerIsFacility;
+        boolean hasMats = method.materials != null && !method.materials.isEmpty();
+
+        if (hasReqs || hasFacility)
+        {
+            target.add(makeCreationSubHeader("Requirements"));
+            target.add(Box.createVerticalStrut(3));
+            if (hasReqs)
+            {
+                for (ItemInfoClient.SkillReq req : method.requirements)
+                {
+                    if (req == null || req.skill == null || req.skill.isEmpty())
+                    {
+                        continue;
+                    }
+                    target.add(buildRequirementRow(req));
+                }
+            }
+            if (hasFacility)
+            {
+                target.add(buildFacilityRow(method.facility));
+            }
+            if (hasMats)
+            {
+                target.add(Box.createVerticalStrut(9));
+            }
+        }
+
+        if (hasMats)
+        {
+            target.add(makeCreationSubHeader("Materials"));
+            target.add(Box.createVerticalStrut(3));
+            for (ItemInfoClient.Material material : method.materials)
+            {
+                if (material == null || material.name == null || material.name.isEmpty())
+                {
+                    continue;
+                }
+                target.add(buildMaterialRow(material));
+            }
+        }
+    }
+
+    private JPanel buildRequirementRow(ItemInfoClient.SkillReq req)
+    {
+        JPanel row = new JPanel();
+        row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
+
+        final int iconBox = 22;
+        JLabel iconLabel = new JLabel();
+        iconLabel.setPreferredSize(new Dimension(iconBox, iconBox));
+        iconLabel.setMinimumSize(new Dimension(iconBox, iconBox));
+        iconLabel.setMaximumSize(new Dimension(iconBox, iconBox));
+        iconLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        iconLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+        if (req.skillIcon != null)
+        {
+            Image scaled = req.skillIcon.getScaledInstance(iconBox, iconBox, Image.SCALE_SMOOTH);
+            iconLabel.setIcon(new ImageIcon(scaled));
+        }
+        row.add(iconLabel);
+        row.add(Box.createHorizontalStrut(8));
+
+        JLabel nameLabel = new JLabel(req.skill);
+        nameLabel.setFont(FontManager.getRunescapeFont());
+        nameLabel.setForeground(Color.WHITE);
+        nameLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+        row.add(nameLabel);
+
+        row.add(Box.createHorizontalGlue());
+
+        if (req.level != null && !req.level.isEmpty())
+        {
+            JLabel levelLabel = new JLabel("Lvl " + req.level);
+            levelLabel.setFont(FontManager.getRunescapeFont());
+            levelLabel.setForeground(GOLD);
+            levelLabel.setAlignmentY(Component.CENTER_ALIGNMENT);
+            row.add(levelLabel);
+        }
+
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+        return row;
+    }
+
+    private JLabel makeCreationSubHeader(String text)
+    {
+        JLabel label = new JLabel(text);
+        label.setFont(FontManager.getRunescapeBoldFont());
+        label.setForeground(GOLD);
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return label;
+    }
+
+
+    private JPanel buildFacilityRow(String facility)
+    {
+        JPanel row = new JPanel();
+        row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
+
+        final int iconBox = 22;
+        JLabel iconLabel = new JLabel();
+        iconLabel.setPreferredSize(new Dimension(iconBox, iconBox));
+        iconLabel.setMinimumSize(new Dimension(iconBox, iconBox));
+        iconLabel.setMaximumSize(new Dimension(iconBox, iconBox));
+        iconLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        iconLabel.setAlignmentY(Component.TOP_ALIGNMENT);
+        if (facilityIcon != null)
+        {
+            Image scaled = facilityIcon.getScaledInstance(iconBox, iconBox, Image.SCALE_SMOOTH);
+            iconLabel.setIcon(new ImageIcon(scaled));
+        }
+        row.add(iconLabel);
+        row.add(Box.createHorizontalStrut(8));
+
+        final String firstFacility = facility.split(",")[0].trim().replaceAll("(?i)\\bor\\b.*$", "").trim();
+        JLabel nameLabel = new JLabel("<html>" + wrapTextManually("Made at: " + facility, 150, FontManager.getRunescapeFont()) + "</html>");
+        nameLabel.setFont(FontManager.getRunescapeFont());
+        nameLabel.setForeground(ALWAYS_COLOR);
+        nameLabel.setAlignmentY(Component.TOP_ALIGNMENT);
+        nameLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        nameLabel.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                if (!firstFacility.isEmpty())
+                {
+                    openInBrowser(officialWikiUrl(firstFacility));
+                }
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                nameLabel.setForeground(GOLD_HOVER);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                nameLabel.setForeground(ALWAYS_COLOR);
+            }
+        });
+        row.add(nameLabel);
+
+        row.add(Box.createHorizontalGlue());
+
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+        return row;
+    }
+
+    private JPanel buildMaterialRow(ItemInfoClient.Material material)
+    {
+        final String name = material.name;
+
+        JPanel row = new JPanel();
+        row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(255, 255, 255, 20)),
+                BorderFactory.createEmptyBorder(6, 0, 6, 0)
+        ));
+
+        final int iconBox = 24;
+        JLabel iconLabel = new JLabel();
+        iconLabel.setPreferredSize(new Dimension(iconBox, iconBox));
+        iconLabel.setMinimumSize(new Dimension(iconBox, iconBox));
+        iconLabel.setMaximumSize(new Dimension(iconBox, iconBox));
+        iconLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        iconLabel.setAlignmentY(Component.TOP_ALIGNMENT);
+        materialIconLabels.computeIfAbsent(name, k -> new ArrayList<>()).add(iconLabel);
+        row.add(iconLabel);
+        row.add(Box.createHorizontalStrut(8));
+
+        JLabel nameLabel = new JLabel("<html>" + wrapTextManually(name, 120, FontManager.getRunescapeFont()) + "</html>");
+        nameLabel.setFont(FontManager.getRunescapeFont());
+        nameLabel.setForeground(ALWAYS_COLOR);
+        nameLabel.setAlignmentY(Component.TOP_ALIGNMENT);
+        nameLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        nameLabel.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                if (materialClickListener != null)
+                {
+                    materialClickListener.accept(name);
+                }
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                nameLabel.setForeground(GOLD_HOVER);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                nameLabel.setForeground(ALWAYS_COLOR);
+            }
+        });
+        row.add(nameLabel);
+
+        row.add(Box.createHorizontalGlue());
+
+        if (material.quantity != null && !material.quantity.isEmpty())
+        {
+            JLabel qtyLabel = new JLabel(material.quantity);
+            qtyLabel.setFont(FontManager.getRunescapeFont());
+            qtyLabel.setForeground(Color.WHITE);
+            qtyLabel.setAlignmentY(Component.TOP_ALIGNMENT);
+            row.add(qtyLabel);
+        }
+
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+        return row;
+    }
+
+    public void updateMaterialIcon(String name, BufferedImage icon)
+    {
+        List<JLabel> labels = materialIconLabels.get(name);
+        if (labels == null || labels.isEmpty() || icon == null)
+        {
+            return;
+        }
+        final int iconBox = 24;
+        Image scaled = icon.getScaledInstance(iconBox, iconBox, Image.SCALE_SMOOTH);
+        ImageIcon imageIcon = new ImageIcon(scaled);
+        for (JLabel label : labels)
+        {
+            label.setIcon(imageIcon);
+        }
+        revalidate();
+        repaint();
+    }
+
+    private JPanel card(JLabel titleLabel, String title, JComponent content)
+    {
+        return buildCard(titleLabel, title, content, false);
+    }
+
+    private JPanel cardFilling(JLabel titleLabel, String title, JComponent content)
+    {
+        return buildCard(titleLabel, title, content, true);
+    }
+
+    private JPanel buildCard(JLabel titleLabel, String title, JComponent content, boolean fill)
+    {
+        styleCardTitle(titleLabel, title);
+
+        RoundedPanel c = new RoundedPanel(CARD_BG, CARD_BORDER, 10);
+        c.setLayout(new BoxLayout(c, BoxLayout.Y_AXIS));
+        c.setAlignmentX(Component.LEFT_ALIGNMENT);
+        c.setBorder(BorderFactory.createEmptyBorder(8, 11, 9, 11));
+        c.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+
+        content.setAlignmentX(Component.LEFT_ALIGNMENT);
+        c.add(titleLabel);
+        c.add(Box.createVerticalStrut(7));
+        c.add(content);
+        if (!fill)
+        {
+
+            c.add(Box.createVerticalGlue());
+        }
+        return c;
+    }
+
+    private JPanel buildCollapsibleCard(JLabel titleLabel, String title, JComponent content)
+    {
+        styleCardTitle(titleLabel, title);
+
+        RoundedPanel c = new RoundedPanel(CARD_BG, CARD_BORDER, 10)
+        {
+            @Override
+            public Dimension getMaximumSize()
+            {
+                // Never taller than the content, so a short section isn't stretched into a blank
+                // box; the cards stack top-down and leftover space falls to the bottom.
+                return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+            }
+
+            @Override
+            public Dimension getMinimumSize()
+            {
+                // Allow shrinking (content scrolls internally) so several tall sections can share
+                // the panel height, but not below a small floor or the card's own content.
+                return new Dimension(10, Math.min(getPreferredSize().height, MIN_CARD_HEIGHT));
+            }
+        };
+        c.setLayout(new BoxLayout(c, BoxLayout.Y_AXIS));
+        c.setAlignmentX(Component.LEFT_ALIGNMENT);
+        c.setBorder(BorderFactory.createEmptyBorder(8, 11, 9, 11));
+
+        final JLabel chevron = new JLabel(createTriangleIcon(DIR_DOWN, NEUTRAL));
+
+        JPanel header = new JPanel();
+        header.setLayout(new BoxLayout(header, BoxLayout.X_AXIS));
+        header.setOpaque(false);
+        header.setAlignmentX(Component.LEFT_ALIGNMENT);
+        header.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        header.add(titleLabel);
+        header.add(Box.createHorizontalGlue());
+        header.add(chevron);
+        header.setMaximumSize(new Dimension(Integer.MAX_VALUE, header.getPreferredSize().height));
+
+        final Component gap = Box.createVerticalStrut(7);
+        content.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        header.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                boolean show = !content.isVisible();
+                content.setVisible(show);
+                gap.setVisible(show);
+                chevron.setIcon(createTriangleIcon(show ? DIR_DOWN : DIR_RIGHT, NEUTRAL));
+                c.revalidate();
+                c.repaint();
+                ItemInfoPanel.this.revalidate();
+                ItemInfoPanel.this.repaint();
+            }
+        });
+
+        c.add(header);
+        c.add(gap);
+        c.add(content);
+        return c;
+    }
+
+    private void styleCardTitle(JLabel label, String title)
+    {
+        label.setText(title);
+        label.setFont(FontManager.getRunescapeBoldFont().deriveFont(16f));
+        label.setForeground(ORANGE);
+        label.setIcon(null);
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+    }
+
+    private void refreshTabBar()
+    {
+        if (tabBar == null)
+        {
+            return;
+        }
+        tabBar.removeAll();
+        tabButtons.clear();
+
+        List<String[]> tabs = new ArrayList<>();
+        tabs.add(new String[]{TAB_STATS, "Stats"});
+        if (combatTabVisible)
+        {
+            tabs.add(new String[]{TAB_COMBAT, "Combat"});
+        }
+        if (sourcesTabVisible)
+        {
+            tabs.add(new String[]{TAB_SOURCES, "Sources"});
+        }
+        tabs.add(new String[]{TAB_INFO, "Info"});
+
+        tabBar.setLayout(new GridLayout(1, tabs.size(), 3, 0));
+        for (String[] t : tabs)
+        {
+            JLabel button = makeTabButton(t[0], t[1]);
+            tabButtons.put(t[0], button);
+            tabBar.add(button);
+        }
+        styleTabs();
+        tabBar.revalidate();
+        tabBar.repaint();
+    }
+
+    private JLabel makeTabButton(String key, String text)
+    {
+
+        JLabel button = new JLabel(text, SwingConstants.CENTER);
+        button.setFont(FontManager.getRunescapeFont());
+        button.setVerticalTextPosition(SwingConstants.BOTTOM);
+        button.setHorizontalTextPosition(SwingConstants.CENTER);
+        button.setIconTextGap(2);
+        button.setOpaque(true);
+        button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        button.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                selectTab(key);
+            }
+        });
+        return button;
+    }
+
+    private void styleTabs()
+    {
+        for (Map.Entry<String, JLabel> entry : tabButtons.entrySet())
+        {
+            boolean active = entry.getKey().equals(currentTab);
+            JLabel button = entry.getValue();
+            button.setBackground(active ? TAB_ACTIVE_BG : TAB_BG);
+            button.setForeground(active ? GOLD : TAB_INACTIVE_FG);
+            button.setIcon(createTabIcon(entry.getKey(), active ? GOLD : TAB_INACTIVE_FG));
+
+            button.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createMatteBorder(0, 0, 2, 0, active ? ORANGE : TAB_BG),
+                    BorderFactory.createEmptyBorder(6, 2, 5, 2)));
+        }
+    }
+
+    private Icon createTabIcon(String key, Color color)
+    {
+        final int size = 15;
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(color);
+                switch (key)
+                {
+                    case TAB_STATS:
+                        g2.fillRect(x + 1, y + 8, 3, 6);
+                        g2.fillRect(x + 6, y + 4, 3, 10);
+                        g2.fillRect(x + 11, y + 6, 3, 8);
+                        break;
+                    case TAB_COMBAT:
+
+                        g2.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                        g2.drawLine(x + 2, y + 13, x + 12, y + 3);
+                        g2.drawLine(x + 13, y + 13, x + 3, y + 3);
+                        g2.setStroke(new BasicStroke(1.3f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                        g2.drawLine(x + 1, y + 10, x + 4, y + 13);
+                        g2.drawLine(x + 14, y + 10, x + 11, y + 13);
+                        break;
+                    case TAB_SOURCES:
+
+                        g2.fillOval(x + 5, y + 1, 5, 5);
+                        g2.fillRoundRect(x + 2, y + 7, 11, 7, 6, 6);
+                        break;
+                    default:
+                        g2.setStroke(new BasicStroke(1.6f));
+                        g2.drawOval(x + 2, y + 2, 11, 11);
+                        g2.fillOval(x + 7, y + 4, 2, 2);
+                        g2.drawLine(x + 8, y + 7, x + 8, y + 11);
+                        break;
+                }
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return size;
+            }
+        };
+    }
+
+    private void selectTab(String key)
+    {
+        currentTab = key;
+
+        if (TAB_SOURCES.equals(key))
+        {
+            ensureSourcesLoaded();
+        }
+        else if (TAB_COMBAT.equals(key))
+        {
+            ensureCombatLoaded();
+        }
+
+        if (contentHolder != null)
+        {
+            contentHolder.removeAll();
+            JComponent page = tabContent.get(key);
+            if (page != null)
+            {
+
+                contentHolder.add(page, BorderLayout.CENTER);
+            }
+            contentHolder.revalidate();
+            contentHolder.repaint();
+        }
+        styleTabs();
+        scrollToTop();
+    }
+
+    private void ensureSourcesLoaded()
+    {
+        if (!sourcesRequested && sourcesLoader != null)
+        {
+            sourcesRequested = true;
+            dropsContent.removeAll();
+            dropsContent.add(makeLoadingSpinner());
+            shopsContent.removeAll();
+            shopsContent.add(makeSourcesInfoLabel("Loading..."));
+            sourcesLoader.run();
+        }
+    }
+
+    private void ensureCombatLoaded()
+    {
+        if (!combatStatsRequested)
+        {
+            combatStatsRequested = true;
+            combatStatsContent.removeAll();
+            if (combatStatsLoader != null)
+            {
+                combatStatsContent.add(makeSourcesInfoLabel("Loading..."));
+                combatStatsLoader.run();
+            }
+            else
+            {
+                combatStatsContent.add(makeSourcesInfoLabel("No combat stats available."));
+            }
+            combatStatsContent.revalidate();
+            combatStatsContent.repaint();
+        }
     }
 
     private JScrollPane findScrollPane()
@@ -1269,17 +2056,6 @@ public class ItemInfoPanel extends PluginPanel
         return (parent instanceof JScrollPane) ? (JScrollPane) parent : null;
     }
 
-    /**
-     * Makes mouse-wheel scrolling "chain" from a nested scrollpane (Drops/Shops/
-     * Description) to the outer page scrollpane once you hit the top or bottom edge,
-     * instead of the wheel just doing nothing there. Swing doesn't do this by default for
-     * nested JScrollPanes - reaching the end of the inner one normally just dead-ends.
-     * <p>
-     * This adds an extra listener rather than replacing anything, so normal scrolling
-     * within the inner pane is untouched; it only forwards the event upward on the
-     * specific edge case where the inner pane is already maxed out in the scroll direction
-     * the wheel is moving.
-     */
     private void enableScrollChaining(JScrollPane inner)
     {
         inner.addMouseWheelListener(e ->
@@ -1319,13 +2095,6 @@ public class ItemInfoPanel extends PluginPanel
         );
     }
 
-    /**
-     * Scrolls the sidebar so the Description box is actually in view - used after
-     * expanding/collapsing "Read more", since toggling that changes the box's height and
-     * without this the newly revealed (or now-shorter) content could end up off-screen
-     * with no obvious indication anything changed. Deferred a tick (same double-invokeLater
-     * pattern as scrollToTop) so it runs after the height change has actually been laid out.
-     */
     private void scrollToDescription()
     {
         SwingUtilities.invokeLater(() ->
@@ -1371,27 +2140,12 @@ public class ItemInfoPanel extends PluginPanel
         return String.format("%,d", value);
     }
 
-    /**
-     * Sanity ceiling for a single shop-sold price. No item in OSRS is legitimately sold by
-     * a shop for anywhere near this much - anything above it is essentially certain to be
-     * a wiki data error (one was found: "Tree (Draynor guard)" showing 10,000,000,000 gp
-     * for Stew, when every other shop sells it for 20-24 gp) rather than a real price.
-     */
     private static final long SHOP_PRICE_SANITY_CAP = 1_000_000_000L;
 
-    /**
-     * Adds comma thousand-separators to a shop price string (e.g. "750" -> "750",
-     * "2500" -> "2,500"). Falls back to the raw string unchanged if it isn't a plain
-     * integer (the wiki's price fields are usually clean numbers, but this avoids crashing
-     * or mangling anything unexpected).
-     */
     private String formatShopPrice(String rawPrice)
     {
         try
         {
-            // long, not int - a raw value like "10000000000" overflows int's ~2.1 billion
-            // range and would silently throw here, falling through to display the raw
-            // unformatted string rather than being caught by the sanity check below.
             long parsed = Long.parseLong(rawPrice.trim().replace(",", ""));
             if (parsed > SHOP_PRICE_SANITY_CAP)
             {
@@ -1405,10 +2159,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Draws a small side-view coin stack (flattened discs stacked vertically, like a
-     * short roll of coins) used for money-related rows: GE price, alch values, item value.
-     */
     private Icon createCoinIcon(Color color)
     {
         final int width = 14;
@@ -1430,7 +2180,6 @@ public class ItemInfoPanel extends PluginPanel
                 int discW = width;
                 int discH = 6;
 
-                // Two flattened "edge" discs stacked beneath, showing the side of the stack.
                 for (int i = 2; i >= 1; i--)
                 {
                     int cy = y + 3 + i * 3;
@@ -1438,7 +2187,6 @@ public class ItemInfoPanel extends PluginPanel
                     g2.fillOval(x, cy, discW, discH);
                 }
 
-                // Top disc: the visible coin face, with a highlight arc for shine.
                 g2.setColor(rim);
                 g2.fillOval(x, y + 2, discW, discH + 2);
                 g2.setColor(color);
@@ -1463,10 +2211,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Draws a small calendar icon (rounded rectangle with a header bar and two hanger
-     * tabs) used for the Released row.
-     */
     private Icon createCalendarIcon(Color color)
     {
         final int size = 12;
@@ -1500,10 +2244,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Draws a small balance-scale icon (two circles on a horizontal bar) used for
-     * the Weight row.
-     */
     private Icon createScaleIcon(Color color)
     {
         final int size = 12;
@@ -1538,9 +2278,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Draws a small checkmark used for "Yes" boolean rows (tradeable, equipable, etc).
-     */
     private Icon createCheckIcon(Color color)
     {
         final int size = 12;
@@ -1572,9 +2309,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Draws a small X used for "No" boolean rows.
-     */
     private Icon createCrossIcon(Color color)
     {
         final int size = 12;
@@ -1606,10 +2340,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Draws a small three-line "list" icon used for rows that aren't a single yes/no
-     * or number, like the Options row.
-     */
     private Icon createListIcon(Color color)
     {
         final int size = 12;
@@ -1641,14 +2371,126 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * A simple dimmed circle outline signaling "this icon is still loading" - used in NPC
-     * drop rows while a specific item's icon is being resolved, before rows had per-icon
-     * loading states this meant either a real icon or nothing at all. Deliberately static
-     * rather than a true animated spinner (which would need a custom Icon plus a shared
-     * Timer tracking every currently-visible label to repaint) - a reasonable amount of
-     * complexity for what's ultimately a small polish detail.
-     */
+    private Icon createTradeableIcon(Color color)
+    {
+        final int size = 13;
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                Color shade = color.darker();
+
+                g2.setColor(shade);
+                g2.fillOval(x + 1, y, 7, 7);
+                g2.setColor(color);
+                g2.fillOval(x + 2, y + 1, 5, 5);
+
+                g2.setColor(shade);
+                g2.fillOval(x + 5, y + 5, 8, 8);
+                g2.setColor(color);
+                g2.fillOval(x + 6, y + 6, 6, 6);
+
+                g2.setColor(shade);
+                g2.fillRect(x + 8, y + 8, 2, 2);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return size;
+            }
+        };
+    }
+
+    private Icon createEquipableIcon(Color color)
+    {
+        final int size = 13;
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                Color shade = color.darker();
+
+                g2.setColor(shade);
+                g2.fillArc(x, y, 12, 12, 0, 180);
+                g2.fillRect(x, y + 6, 12, 5);
+
+                g2.setColor(color);
+                g2.fillArc(x + 1, y + 1, 10, 10, 0, 180);
+                g2.fillRect(x + 1, y + 6, 4, 4);
+                g2.fillRect(x + 7, y + 6, 4, 4);
+
+                g2.setColor(shade);
+                g2.fillRect(x + 1, y + 5, 10, 1);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return size;
+            }
+        };
+    }
+
+    private Icon createStackableIcon(Color color)
+    {
+        final int size = 16;
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                Color shade = color.darker();
+                Color hi = color.brighter();
+                final int w = 14;
+
+                for (int i = 0; i < 4; i++)
+                {
+                    int cy = y + 12 - i * 3;
+                    g2.setColor(shade);
+                    g2.fillOval(x + 1, cy, w, 4);
+                    g2.setColor(color);
+                    g2.fillOval(x + 1, cy, w, 3);
+                    g2.setColor(hi);
+                    g2.fillRect(x + 4, cy + 1, 3, 1);
+                }
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return size;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return size;
+            }
+        };
+    }
+
     private Icon createSmallSpinnerIcon()
     {
         final int size = 16;
@@ -1679,11 +2521,6 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    /**
-     * Picks the right icon for a boolean-style value: the real checkbox-checked sprite for
-     * Yes, checkbox-crossed sprite for No (falling back to hand-drawn versions of the same
-     * shapes if those sprites haven't loaded), or a hand-drawn list icon for anything else.
-     */
     private Icon yesNoIcon(String value, Color color)
     {
         if ("Yes".equalsIgnoreCase(value))
@@ -1697,10 +2534,6 @@ public class ItemInfoPanel extends PluginPanel
         return createListIcon(color);
     }
 
-    /**
-     * Returns green for "Yes", a muted red for "No", or neutral gray for anything else -
-     * used to color-code boolean-style stats (Tradeable, Equipable, Members, etc).
-     */
     private Color yesNoColor(String value)
     {
         if ("Yes".equalsIgnoreCase(value))
@@ -1714,26 +2547,24 @@ public class ItemInfoPanel extends PluginPanel
         return NEUTRAL;
     }
 
-    /**
-     * Adds one label/value row to the info table using GridBagLayout, with a small
-     * category icon and the value text tinted to match. Pass null for icon/accentColor
-     * to fall back to the default (uncolored, iconless) look.
-     */
+    private boolean isYesNo(String value)
+    {
+        return value != null && ("Yes".equalsIgnoreCase(value)
+                || "No".equalsIgnoreCase(value) || "Unknown".equalsIgnoreCase(value));
+    }
+
     private void addTableRow(int row, String label, String value, Icon icon, Color accentColor)
     {
-        // 13pt (from an earlier compacting pass) turned out too small to read comfortably.
-        // Moving the item name beside the icon instead of below it freed up enough
-        // vertical space that this can go back up to something more readable without
-        // growing the panel taller overall.
-        Font labelFont = FontManager.getRunescapeFont().deriveFont(15f);
-        Font valueFont = FontManager.getRunescapeFont().deriveFont(15f);
+        Font labelFont = FontManager.getRunescapeFont();
+        Font valueFont = FontManager.getRunescapeFont();
 
         JLabel labelComp = new JLabel(label);
         labelComp.setFont(labelFont);
         labelComp.setForeground(Color.WHITE);
         if (icon != null)
         {
-            labelComp.setIcon(icon);
+
+            labelComp.setIcon(fixedWidthIcon(icon, 20));
             labelComp.setIconTextGap(6);
         }
 
@@ -1767,13 +2598,34 @@ public class ItemInfoPanel extends PluginPanel
         addTableRow(row, label, value, null, null);
     }
 
-    /**
-     * Scales the header name label's font down for longer names, so it fits within the
-     * fixed 110px wrap width without overflowing even after wrapping - "Thermonuclear
-     * smoke devil" (25 characters) still didn't fit cleanly at the previous fixed 20f
-     * size. Thresholds are a starting point based on character count, not a precise
-     * pixel-width measurement, so may still need adjustment for other long names.
-     */
+    private Icon fixedWidthIcon(final Icon base, final int width)
+    {
+        if (base == null)
+        {
+            return null;
+        }
+        return new Icon()
+        {
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                base.paintIcon(c, g, x, y);
+            }
+
+            @Override
+            public int getIconWidth()
+            {
+                return width;
+            }
+
+            @Override
+            public int getIconHeight()
+            {
+                return base.getIconHeight();
+            }
+        };
+    }
+
     private Font headerNameFont(String name)
     {
         int length = name != null ? name.length() : 0;
@@ -1785,6 +2637,9 @@ public class ItemInfoPanel extends PluginPanel
     {
         ensureItemViewShown();
         nameLabel.setText("<html>" + wrapTextManually(name, 140, headerNameFont(name)) + "</html>");
+        priceSubLabel.setIcon(price > 0 ? coinIcon() : null);
+        priceSubLabel.setIconTextGap(5);
+        priceSubLabel.setText(price > 0 ? formatPrice(price) + " gp" : "");
         if (image != null)
         {
             setImage(image);
@@ -1795,11 +2650,10 @@ public class ItemInfoPanel extends PluginPanel
         }
 
         infoTable.removeAll();
-        // Price data is known synchronously here, but the rest of the properties (Released,
-        // Members, etc.) only arrive later via a separate async wiki fetch. Rather than add
-        // these rows now and the rest afterward - which would lock in "Price first" purely
-        // by timing, regardless of what order actually looks best - they're stashed until
-        // setItemProperties() renders everything together in one deliberately-chosen order.
+        priceGraphPanel.setVisible(false);
+        sparkline.setData(null, null);
+        priceTicker.setSegments(null);
+        priceTicker.setVisible(false);
         pendingPrice = price;
         pendingHighAlch = highAlch;
         pendingLowAlch = lowAlch;
@@ -1816,13 +2670,6 @@ public class ItemInfoPanel extends PluginPanel
         scrollToTop();
     }
 
-    /**
-     * Renders the full Properties table for an item in one pass, combining the price data
-     * captured earlier in showItem() with the wiki infobox data that just arrived - this is
-     * what lets the final row order (Released, then price/value info, then the yes/no
-     * fields, then Options) be chosen deliberately instead of being at the mercy of which
-     * data happened to arrive first.
-     */
     public void setItemProperties(ItemInfoClient.InfoboxData info)
     {
         infoTable.removeAll();
@@ -1832,10 +2679,7 @@ public class ItemInfoPanel extends PluginPanel
         {
             addTableRow(row++, "Released:", info.released, createCalendarIcon(BLUE), BLUE);
         }
-        if (pendingPrice > 0)
-        {
-            addTableRow(row++, "GE Price:", formatPrice(pendingPrice) + " gp", coinIcon(), GOLD);
-        }
+
         if (pendingHighAlch > 0)
         {
             addTableRow(row++, "High alch:", formatPrice(pendingHighAlch) + " gp", highAlchIcon(), GOLD);
@@ -1846,15 +2690,16 @@ public class ItemInfoPanel extends PluginPanel
         }
         if (info != null)
         {
-            String formattedValue = formatValueString(info.value) + " gp";
-            addTableRow(row++, "Value:", formattedValue, coinIcon(), GOLD);
+            addTableRow(row++, "Value:", formatValueString(info.value) + " gp", coinIcon(), GOLD);
             addTableRow(row++, "Weight:", info.weight + " kg", weightIcon(), BLUE);
             addTableRow(row++, "Members:", info.members, membersRowIcon(info.members), yesNoColor(info.members));
-            addTableRow(row++, "Tradeable:", info.tradeable, yesNoIcon(info.tradeable, yesNoColor(info.tradeable)), yesNoColor(info.tradeable));
-            addTableRow(row++, "Equipable:", info.equipable, yesNoIcon(info.equipable, yesNoColor(info.equipable)), yesNoColor(info.equipable));
-            addTableRow(row++, "Stackable:", info.stackable, yesNoIcon(info.stackable, yesNoColor(info.stackable)), yesNoColor(info.stackable));
+            addTableRow(row++, "Tradeable:", info.tradeable, tradeableIcon(), yesNoColor(info.tradeable));
+            addTableRow(row++, "Equipable:", info.equipable, equipableIcon(), yesNoColor(info.equipable));
+            addTableRow(row++, "Stackable:", info.stackable, stackableIcon(), yesNoColor(info.stackable));
             addTableRow(row++, "Noteable:", info.noteable, noteIcon(), yesNoColor(info.noteable));
-            addTableRow(row++, "Quest item:", info.questItem, questIcon(), yesNoColor(info.questItem));
+
+            Color questColor = isYesNo(info.questItem) ? yesNoColor(info.questItem) : BLUE;
+            addTableRow(row++, "Quest:", info.questItem, questIcon(), questColor);
             addTableRow(row++, "Options:", info.options, createListIcon(NEUTRAL), NEUTRAL);
         }
 
@@ -1864,13 +2709,6 @@ public class ItemInfoPanel extends PluginPanel
         scrollToTop();
     }
 
-    /**
-     * Populates Properties for an NPC. Unlike items (where every field is always expected
-     * and missing ones show "Unknown"), NPC fields are conditional on which of the two NPC
-     * infobox templates the page actually uses - a row is only added when that field is
-     * genuinely present, rather than cluttering the list with "Unknown" for fields that
-     * were never applicable to begin with (e.g. "Max hit" for a friendly, non-combat NPC).
-     */
     public void setNpcProperties(ItemInfoClient.NpcInfoboxData data)
     {
         if (data == null)
@@ -1880,10 +2718,6 @@ public class ItemInfoPanel extends PluginPanel
         }
 
         int row = currentRowCount();
-        // Order: identity info first (Released, Race), then combat stats (Combat level,
-        // Attack style), then Max hit paired right next to Poisonous as specifically
-        // requested, then the remaining yes/no "checkbox" fields grouped together
-        // (Aggressive, Members), then the more niche fields last (Slayer level, Quest).
         if (data.released != null)
         {
             addTableRow(row++, "Released:", data.released, createCalendarIcon(BLUE), BLUE);
@@ -1932,9 +2766,6 @@ public class ItemInfoPanel extends PluginPanel
         scrollToTop();
     }
 
-    /**
-     * Populates Properties for an object/scenery, same conditional-row approach as NPCs.
-     */
     public void setObjectProperties(ItemInfoClient.ObjectInfoboxData data)
     {
         if (data == null)
@@ -1982,93 +2813,60 @@ public class ItemInfoPanel extends PluginPanel
 
     private int currentRowCount()
     {
-        // Each row adds 2 components (label + value), so divide by 2 for the next free row index.
         return infoTable.getComponentCount() / 2;
     }
 
-    /**
-     * Registers the callback that fetches drop/shop sources for the item currently shown.
-     * Passing null (e.g. for NPCs/objects, which don't have item sources) hides the whole
-     * Item Sources section instead of showing one that goes nowhere useful.
-     * <p>
-     * If Item Sources was already expanded (from a previous item), this immediately
-     * re-fetches for the new item rather than waiting for the user to expand it again -
-     * their expand/collapse choices should carry over between items, not reset each time.
-     */
     public void setSourcesLoader(Runnable loader)
     {
         this.sourcesLoader = loader;
-        itemSourcesPanel.setVisible(loader != null);
+        sourcesTabVisible = (loader != null);
+        refreshTabBar();
 
-        if (itemSourcesExpanded && loader != null && !sourcesRequested)
+        if (!sourcesTabVisible && TAB_SOURCES.equals(currentTab))
         {
-            sourcesRequested = true;
-            dropsContent.removeAll();
-            dropsContent.add(makeLoadingSpinner());
-            shopsContent.removeAll();
-            shopsContent.add(makeSourcesInfoLabel("Loading..."));
-            loader.run();
+            selectTab(TAB_STATS);
+        }
+        else if (TAB_SOURCES.equals(currentTab))
+        {
+            ensureSourcesLoaded();
         }
     }
 
-    /**
-     * Shows or hides the whole "Shops" accordion under Item Sources - used to hide it
-     * entirely for NPCs (which aren't sold anywhere, unlike items), rather than showing an
-     * always-empty "Not sold in any shops" section that doesn't apply to them at all.
-     */
     public void setShopsSectionVisible(boolean visible)
     {
-        shopsHeaderLabel.setVisible(visible);
-        shopsScrollPane.setVisible(visible && shopsExpanded);
+        if (shopsCard != null)
+        {
+            shopsCard.setVisible(visible);
+        }
         revalidate();
         repaint();
     }
 
-    /**
-     * Convenience overload defaulting to "Drops" - used for the normal NPC case.
-     */
     public void setNpcDropsMode(boolean npcMode)
     {
         setNpcDropsMode(npcMode, "Drops");
     }
 
-    /**
-     * @param label the outer accordion's text when npcMode is true - "Drops" for an NPC's
-     *              own drop table, "Rewards" for a reward casket's contents. Ignored when
-     *              npcMode is false (the outer accordion is "Item sources" in that case
-     *              regardless).
-     */
     public void setNpcDropsMode(boolean npcMode, String label)
     {
         this.npcDropsMode = npcMode;
         this.singleSectionLabel = label;
-        dropsHeaderLabel.setVisible(!npcMode);
-        updateAccordionHeader(itemSourcesHeaderLabel, npcMode ? singleSectionLabel : "Item sources", itemSourcesExpanded, itemSourcesHovering);
-        dropsScrollPane.setVisible(npcMode ? itemSourcesExpanded : (itemSourcesExpanded && dropsExpanded));
+
+        styleCardTitle(dropsHeaderLabel, npcMode ? label : "Drops");
         revalidate();
         repaint();
     }
 
-    /**
-     * Registers the callback fired when a name in the Drops list is clicked - the panel
-     * itself has no access to game/client resources needed to actually resolve and display
-     * the clicked item/NPC, so this is wired up once by the plugin at startup.
-     */
     public void setDropRowClickListener(BiConsumer<String, String> listener)
     {
         this.dropRowClickListener = listener;
     }
 
-    /** Registers the callback fired when the back button (top-left, above the icon/name)
-     * is clicked - the plugin owns the actual navigation history, since it needs to
-     * re-invoke game/client-dependent show flows to go back. */
     public void setBackButtonListener(Runnable listener)
     {
         this.backButtonListener = listener;
     }
 
-    /** Shows or hides the back button - only relevant once there's actually somewhere to
-     * go back to. */
     public void setBackButtonVisible(boolean visible)
     {
         backButtonLabel.setVisible(visible);
@@ -2076,43 +2874,21 @@ public class ItemInfoPanel extends PluginPanel
         repaint();
     }
 
-    /**
-     * Lets the plugin's drop-row click listener tell which lookup flow to use: a name
-     * clicked while viewing an item's own drops is a monster name, while a name clicked
-     * while viewing an NPC's own drops is an item name.
-     */
     public boolean isNpcDropsMode()
     {
         return npcDropsMode;
     }
 
-    /**
-     * Called by the plugin (which has access to the game client, unlike this panel) each
-     * time an item is examined, so the drops list can colour-code monster combat levels
-     * relative to the player's own. Pass -1 if the player's level couldn't be read.
-     */
     public void setPlayerCombatLevel(int level)
     {
         this.playerCombatLevel = level;
     }
 
-    /**
-     * Controls whether stat cells in the Combat Stats section get a hover tooltip
-     * explaining what that stat means. Set once by the plugin at startup, and again
-     * whenever the user changes the "Tooltips" config option live via onConfigChanged.
-     * Tooltip text is applied once, at cell-build time in buildBonusCell/buildLevelCell,
-     * so a live config change takes effect on the next item/NPC looked up - it doesn't
-     * retroactively add or remove tooltips from whatever's already displayed.
-     */
     public void setShowTooltips(boolean showTooltips)
     {
         this.showTooltips = showTooltips;
     }
 
-    /**
-     * Called once by the plugin at startup with the real coins item sprite (item 995).
-     * Scaled down to match the other property-row icons.
-     */
     public void setCoinIcon(BufferedImage image)
     {
         if (image != null)
@@ -2122,11 +2898,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the bundled max-hit hitsplat icon (a real
-     * cropped screenshot, not a fetched sprite - there was no safe sprite constant for a
-     * standard damage hitsplat to fetch instead).
-     */
     public void setMaxHitIcon(BufferedImage image)
     {
         if (image != null)
@@ -2136,10 +2907,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the bundled poison icon (also a cropped
-     * screenshot rather than a fetched sprite, for consistency with the max-hit icon).
-     */
     public void setPoisonIcon(BufferedImage image)
     {
         if (image != null)
@@ -2149,9 +2916,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the bundled quest icon.
-     */
     public void setQuestIcon(BufferedImage image)
     {
         if (image != null)
@@ -2161,8 +2925,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /** Called once by the plugin at startup with the bundled bank-note icon, used for the
-     * Noteable row. */
     public void setNoteIcon(BufferedImage image)
     {
         if (image != null)
@@ -2172,8 +2934,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /** Called once by the plugin at startup with the bundled crossed-swords icon, used for
-     * the NPC Aggressive row. */
     public void setAggressiveIcon(BufferedImage image)
     {
         if (image != null)
@@ -2183,8 +2943,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /** Called once by the plugin at startup with the bundled gold-star members icon, shown
-     * for the Members row when the value is Yes. */
     public void setMemberIcon(BufferedImage image)
     {
         if (image != null)
@@ -2194,8 +2952,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /** Called once by the plugin at startup with the bundled gray-star free-to-play icon,
-     * shown for the Members row when the value is No. */
     public void setF2pIcon(BufferedImage image)
     {
         if (image != null)
@@ -2205,10 +2961,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the real equipment-weight sprite.
-     * Scaled down to match the other property-row icons.
-     */
     public void setWeightIcon(BufferedImage image)
     {
         if (image != null)
@@ -2218,10 +2970,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the real checkbox-checked sprite, used for
-     * "Yes" boolean rows (Members, Tradeable, etc).
-     */
     public void setYesIcon(BufferedImage image)
     {
         if (image != null)
@@ -2231,10 +2979,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the real checkbox-crossed sprite, used for
-     * "No" boolean rows (Quest item, Noteable, etc).
-     */
     public void setNoIcon(BufferedImage image)
     {
         if (image != null)
@@ -2244,9 +2988,53 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the real High Level Alchemy spell icon.
-     */
+    public void setTradeableIcon(BufferedImage image)
+    {
+
+        if (image != null && !isBlankImage(image))
+        {
+            Image scaled = image.getScaledInstance(16, 16, Image.SCALE_SMOOTH);
+            realTradeableIcon = new ImageIcon(scaled);
+        }
+    }
+
+    private boolean isBlankImage(BufferedImage image)
+    {
+        if (!image.getColorModel().hasAlpha())
+        {
+            return false;
+        }
+        for (int y = 0; y < image.getHeight(); y++)
+        {
+            for (int x = 0; x < image.getWidth(); x++)
+            {
+                if ((image.getRGB(x, y) >>> 24) != 0)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    public void setEquipableIcon(BufferedImage image)
+    {
+        if (image != null)
+        {
+            Image scaled = image.getScaledInstance(16, 16, Image.SCALE_SMOOTH);
+            realEquipableIcon = new ImageIcon(scaled);
+        }
+    }
+
+    public void setStackableIcon(BufferedImage image)
+    {
+        if (image != null)
+        {
+            Image scaled = image.getScaledInstance(16, 16, Image.SCALE_SMOOTH);
+            realStackableIcon = new ImageIcon(scaled);
+        }
+    }
+
     public void setHighAlchIcon(BufferedImage image)
     {
         if (image != null)
@@ -2256,9 +3044,6 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /**
-     * Called once by the plugin at startup with the real Low Level Alchemy spell icon.
-     */
     public void setLowAlchIcon(BufferedImage image)
     {
         if (image != null)
@@ -2268,56 +3053,61 @@ public class ItemInfoPanel extends PluginPanel
         }
     }
 
-    /** The real coins sprite once it's arrived, otherwise the hand-drawn fallback. */
     private Icon coinIcon()
     {
         return realCoinIcon != null ? realCoinIcon : createCoinIcon(GOLD);
     }
 
-    /** The bundled max-hit icon, otherwise the hand-drawn list-icon fallback. */
     private Icon maxHitIcon()
     {
         return realMaxHitIcon != null ? realMaxHitIcon : createListIcon(RED);
     }
 
-    /** The bundled poison icon, otherwise the hand-drawn check-icon fallback. */
     private Icon poisonIcon()
     {
         return realPoisonIcon != null ? realPoisonIcon : createCheckIcon(GREEN);
     }
 
-    /** The bundled quest icon, otherwise the hand-drawn list-icon fallback. */
     private Icon questIcon()
     {
         return realQuestIcon != null ? realQuestIcon : createListIcon(NEUTRAL);
     }
 
-    /** The bundled bank-note icon, otherwise the hand-drawn list-icon fallback. */
     private Icon noteIcon()
     {
         return realNoteIcon != null ? realNoteIcon : createListIcon(NEUTRAL);
     }
 
-    /** The bundled crossed-swords icon, otherwise the hand-drawn list-icon fallback. */
     private Icon aggressiveIcon()
     {
         return realAggressiveIcon != null ? realAggressiveIcon : createListIcon(RED);
     }
 
-    /** The bundled gold-star icon (Members: Yes), otherwise the hand-drawn check fallback. */
     private Icon memberIcon()
     {
         return realMemberIcon != null ? realMemberIcon : createCheckIcon(GREEN);
     }
 
-    /** The bundled gray-star icon (Members: No), otherwise the hand-drawn cross fallback. */
     private Icon f2pIcon()
     {
         return realF2pIcon != null ? realF2pIcon : createCrossIcon(RED);
     }
 
-    /** Picks the gold-star member icon for "Yes" or the gray-star f2p icon for "No" -
-     * used for every "Members:" row (items, NPCs, and objects all have one). */
+    private Icon tradeableIcon()
+    {
+        return realTradeableIcon != null ? realTradeableIcon : createTradeableIcon(GOLD);
+    }
+
+    private Icon equipableIcon()
+    {
+        return realEquipableIcon != null ? realEquipableIcon : createEquipableIcon(new Color(150, 160, 175));
+    }
+
+    private Icon stackableIcon()
+    {
+        return realStackableIcon != null ? realStackableIcon : createStackableIcon(GOLD);
+    }
+
     private Icon membersRowIcon(String value)
     {
         if ("Yes".equalsIgnoreCase(value))
@@ -2331,32 +3121,21 @@ public class ItemInfoPanel extends PluginPanel
         return createListIcon(NEUTRAL);
     }
 
-    /** The real equipment-weight sprite once it's arrived, otherwise the hand-drawn fallback. */
     private Icon weightIcon()
     {
         return realWeightIcon != null ? realWeightIcon : createScaleIcon(BLUE);
     }
 
-    /** The real High Alchemy spell icon once it's arrived, otherwise the coin fallback. */
     private Icon highAlchIcon()
     {
         return realHighAlchIcon != null ? realHighAlchIcon : createCoinIcon(GOLD);
     }
 
-    /** The real Low Alchemy spell icon once it's arrived, otherwise the coin fallback. */
     private Icon lowAlchIcon()
     {
         return realLowAlchIcon != null ? realLowAlchIcon : createCoinIcon(GOLD);
     }
 
-    /**
-     * Clears out any stale sources data from the previous item, but deliberately does NOT
-     * collapse the Item Sources/Drops/Shops sections if the user already had them open -
-     * examining a new item should keep your expand/collapse choices, not reset them every
-     * time. The actual re-fetch for the new item is triggered separately by
-     * setSourcesLoader once the new item's loader is wired up (this runs too early for
-     * that - the old item's loader is still in place at this point).
-     */
     private void resetSources()
     {
         sourcesRequested = false;
@@ -2364,56 +3143,12 @@ public class ItemInfoPanel extends PluginPanel
         cachedShops = null;
         dropsContent.removeAll();
         shopsContent.removeAll();
-        itemSourcesContent.setVisible(itemSourcesExpanded);
-        dropsScrollPane.setVisible(dropsExpanded);
-        shopsScrollPane.setVisible(shopsExpanded);
-    }
-
-    /**
-     * Wires up a dropdown-arrow accordion header label: hover highlight plus a click handler
-     * that flips the given expanded flag (via the supplied getter/setter pair) and re-runs
-     * the toggle callback.
-     */
-    private void wireAccordionHeader(JLabel label, Supplier<String> titleSupplier, Supplier<Boolean> getExpanded,
-                                     Supplier<Boolean> getHovering, Consumer<Boolean> setHovering, Runnable onToggle)
-    {
-        label.setFont(FontManager.getRunescapeBoldFont().deriveFont(16f));
-        label.setIconTextGap(6);
-        label.setAlignmentX(Component.LEFT_ALIGNMENT);
-        label.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        updateAccordionHeader(label, titleSupplier.get(), getExpanded.get(), getHovering.get());
-
-        label.addMouseListener(new MouseAdapter()
+        materialIconLabels.clear();
+        if (materialsCard != null)
         {
-            @Override
-            public void mousePressed(MouseEvent e)
-            {
-                onToggle.run();
-            }
-
-            @Override
-            public void mouseEntered(MouseEvent e)
-            {
-                setHovering.accept(true);
-                updateAccordionHeader(label, titleSupplier.get(), getExpanded.get(), true);
-            }
-
-            @Override
-            public void mouseExited(MouseEvent e)
-            {
-                setHovering.accept(false);
-                updateAccordionHeader(label, titleSupplier.get(), getExpanded.get(), false);
-            }
-        });
-    }
-
-    private void updateAccordionHeader(JLabel label, String title, boolean expanded, boolean hovering)
-    {
-        Color color = hovering ? GOLD_HOVER : GOLD;
-        label.setText(title);
-        label.setIcon(createChevronIcon(expanded, color));
-        label.setForeground(color);
-        label.setToolTipText(expanded ? "Click to collapse" : "Click to expand");
+            materialsContent.removeAll();
+            materialsCard.setVisible(false);
+        }
     }
 
     private static final int DIR_RIGHT = 0;
@@ -2421,19 +3156,6 @@ public class ItemInfoPanel extends PluginPanel
     private static final int DIR_UP = 2;
     private static final int DIR_LEFT = 3;
 
-    private Icon createChevronIcon(boolean expanded, Color color)
-    {
-        return createTriangleIcon(expanded ? DIR_DOWN : DIR_RIGHT, color);
-    }
-
-    /**
-     * Draws a small solid triangle pointing right, down, or up, as an actual icon rather
-     * than a text character. Pixel fonts like the RuneScape one don't reliably include
-     * clean arrow/chevron glyphs, so drawing the shape directly guarantees it always looks
-     * right regardless of font glyph coverage. Shared by the section accordion headers,
-     * Read more/less, and Back to top so all the dropdown/expand indicators in the panel
-     * look consistent.
-     */
     private Icon createTriangleIcon(int direction, Color color)
     {
         final int size = 10;
@@ -2488,108 +3210,75 @@ public class ItemInfoPanel extends PluginPanel
         };
     }
 
-    private void toggleProperties()
-    {
-        propertiesExpanded = !propertiesExpanded;
-        updateAccordionHeader(propertiesHeaderLabel, "Properties", propertiesExpanded, propertiesHovering);
-        updatePropertiesVisibility();
-        revalidate();
-        repaint();
-    }
-
-    /**
-     * Keeps the Properties card's visibility in sync: it only shows up once there's actual
-     * stats data for the current item, and within that, the stats table itself respects
-     * the user's expand/collapse choice. Item Sources is its own independent section now, so
-     * it no longer factors into whether Properties shows up.
-     */
     private void updatePropertiesVisibility()
     {
-        boolean hasStats = currentRowCount() > 0;
-        infoTable.setVisible(hasStats && propertiesExpanded);
-        propertiesPanel.setVisible(hasStats);
-    }
 
-    private void toggleDescription()
-    {
-        descriptionExpanded = !descriptionExpanded;
-        updateAccordionHeader(descriptionHeaderLabel, "Description", descriptionExpanded, descriptionHovering);
-        descriptionContent.setVisible(descriptionExpanded);
-        revalidate();
-        repaint();
-    }
-
-    /**
-     * Toggles the outer Item Sources row. Expanding it reveals the nested Drops/Shops rows
-     * (still collapsed themselves at first) and fires the lazy combined fetch the first
-     * time this is opened for the current item - both nested rows share this one fetch.
-     */
-    private void toggleItemSources()
-    {
-        itemSourcesExpanded = !itemSourcesExpanded;
-        updateAccordionHeader(itemSourcesHeaderLabel, npcDropsMode ? singleSectionLabel : "Item sources", itemSourcesExpanded, itemSourcesHovering);
-        itemSourcesContent.setVisible(itemSourcesExpanded);
-
-        if (npcDropsMode)
-        {
-            // No nested "Drops" toggle in this mode - the outer accordion directly
-            // controls the drops list's visibility instead of requiring a second click.
-            dropsExpanded = itemSourcesExpanded;
-            dropsScrollPane.setVisible(itemSourcesExpanded);
-        }
-
-        if (itemSourcesExpanded && !sourcesRequested)
-        {
-            sourcesRequested = true;
-            dropsContent.removeAll();
-            dropsContent.add(makeLoadingSpinner());
-            shopsContent.removeAll();
-            shopsContent.add(makeSourcesInfoLabel("Loading..."));
-
-            if (sourcesLoader != null)
-            {
-                sourcesLoader.run();
-            }
-        }
-
-        revalidate();
-        repaint();
-    }
-
-    private void toggleDrops()
-    {
-        dropsExpanded = !dropsExpanded;
-        updateAccordionHeader(dropsHeaderLabel, "Drops", dropsExpanded, dropsHovering);
-        dropsScrollPane.setVisible(dropsExpanded);
-        revalidate();
-        repaint();
-    }
-
-    private void toggleShops()
-    {
-        shopsExpanded = !shopsExpanded;
-        updateAccordionHeader(shopsHeaderLabel, "Shops", shopsExpanded, shopsHovering);
-        shopsScrollPane.setVisible(shopsExpanded);
-        revalidate();
-        repaint();
+        infoTable.setVisible(true);
     }
 
     private JLabel makeSourcesInfoLabel(String text)
     {
         JLabel label = new JLabel(text);
-        label.setFont(new Font("Segoe UI", Font.ITALIC, 12));
+        label.setFont(FontManager.getRunescapeFont());
         label.setForeground(NEUTRAL);
         label.setAlignmentX(Component.LEFT_ALIGNMENT);
         return label;
     }
 
-    /**
-     * A real loading indicator instead of static "Loading..." text - most noticeable on
-     * NPC drop tables, where every unique item needs its own icon resolved before the
-     * whole list renders at once, so this can sit on screen for a real, visible stretch
-     * of time. Uses Swing's built-in indeterminate JProgressBar (animates on its own,
-     * no custom timer/animation code needed) rather than hand-building a spinner.
-     */
+    private JLabel makeSourcesLink(String text, String url)
+    {
+        JLabel link = new JLabel(text);
+        link.setFont(FontManager.getRunescapeFont());
+        link.setForeground(GOLD);
+        link.setAlignmentX(Component.LEFT_ALIGNMENT);
+        link.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        link.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mousePressed(MouseEvent e)
+            {
+                openInBrowser(url);
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e)
+            {
+                link.setForeground(GOLD_HOVER);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e)
+            {
+                link.setForeground(GOLD);
+            }
+        });
+        return link;
+    }
+
+    public void showDropsLink(String message, String url)
+    {
+        cachedDrops = new ArrayList<>();
+        cachedShops = new ArrayList<>();
+        dropIconLabels.clear();
+
+        dropsContent.removeAll();
+        Font sourcesFont = FontManager.getRunescapeFont();
+        JLabel info = makeSourcesInfoLabel("<html>" + wrapTextManually(message, 165, sourcesFont) + "</html>");
+        info.setBorder(BorderFactory.createEmptyBorder(0, 0, 6, 0));
+        dropsContent.add(info);
+        dropsContent.add(makeSourcesLink(
+                "<html>" + wrapTextManually("View all drop sources on the wiki  ↗", 165, sourcesFont) + "</html>", url));
+        dropsContent.add(Box.createVerticalGlue());
+        dropsContent.revalidate();
+
+        shopsContent.removeAll();
+        shopsContent.add(makeSourcesInfoLabel("Not sold in any shops."));
+        shopsContent.revalidate();
+
+        revalidate();
+        repaint();
+    }
+
     private JComponent makeLoadingSpinner()
     {
         JPanel wrapper = new JPanel();
@@ -2614,66 +3303,32 @@ public class ItemInfoPanel extends PluginPanel
     }
 
     private static final Color ALWAYS_COLOR = new Color(135, 206, 235);
-    // Four-tier rarity gradient (green -> yellow -> red -> purple), replacing the previous
-    // all-green-shades scheme - the higher tiers now read as visibly more significant
-    // rather than just slightly darker green, closer to how OSRS players actually talk
-    // about drop tiers (common/uncommon/rare/legendary-tier "insane rarity" drops).
     private static final Color RARITY_COMMON = new Color(80, 220, 100);
     private static final Color RARITY_UNCOMMON = new Color(230, 210, 60);
     private static final Color RARITY_RARE = new Color(225, 80, 80);
     private static final Color RARITY_LEGENDARY = new Color(190, 110, 235);
     private static final Color RARITY_UNKNOWN = NEUTRAL;
 
-    /**
-     * Populates the nested Drops and Shops rows independently. Results are cached so
-     * re-collapsing/re-expanding either row doesn't rebuild anything, and this is safe to
-     * call even if the user has since collapsed everything (nothing renders until they
-     * expand it again).
-     */
     public void setSources(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops)
     {
         setSourcesInternal(drops, shops, null, false);
     }
 
-    /**
-     * @param dropIcons item name -> icon, used only for NPC drop rows (where every row is
-     *                  an item, so a matching icon makes sense). Item Sources' own drop
-     *                  rows (monsters) keep using the no-icon overload above, since a
-     *                  monster icon would need a much heavier per-row wiki image fetch
-     *                  instead of the item-id-based lookup already built for navigation.
-     */
     public void setSources(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops, Map<String, BufferedImage> dropIcons)
     {
         setSourcesInternal(drops, shops, dropIcons, false);
     }
 
-    /**
-     * Renders the drop rows immediately, with every icon slot showing a small loading
-     * spinner instead of waiting for the whole batch to resolve first - the plugin then
-     * calls updateDropIcon() individually as each one finishes, rather than one big wait
-     * before anything appears at all.
-     */
     public void setSourcesWithLoadingIcons(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops)
     {
         setSourcesInternal(drops, shops, null, true);
     }
 
-    /**
-     * Same as above, but with some icons already known upfront (e.g. from a previous
-     * examine's cache) - those show immediately instead of a spinner, while anything not
-     * yet in knownIcons still gets one.
-     */
     public void setSourcesWithLoadingIcons(List<ItemInfoClient.DropSource> drops, List<ItemInfoClient.ShopSource> shops, Map<String, BufferedImage> knownIcons)
     {
         setSourcesInternal(drops, shops, knownIcons, true);
     }
 
-    /**
-     * Updates a single item's icon in place, once it resolves - finds every row currently
-     * showing that item name (a drop table can list the same item multiple times, e.g.
-     * "Coins" at several different quantities/rarities) and swaps its loading spinner for
-     * the real icon, without touching or rebuilding any other row.
-     */
     public void updateDropIcon(String itemName, BufferedImage icon)
     {
         List<JLabel> labels = dropIconLabels.get(itemName);
@@ -2701,11 +3356,6 @@ public class ItemInfoPanel extends PluginPanel
         dropsContent.removeAll();
         if (cachedDrops.isEmpty())
         {
-            // Generalized from an NPC-specific message to use singleSectionLabel, so this
-            // reads naturally for any single-source case, not just NPCs - "No known drop
-            // sources" (the two-level Item Sources > Drops/Shops phrasing) reads oddly
-            // here since in this mode the section IS the one list, with no separate Shops
-            // to fall back to.
             String emptyMessage = npcDropsMode
                     ? "No " + singleSectionLabel.toLowerCase() + " available."
                     : "No known drop sources.";
@@ -2713,22 +3363,30 @@ public class ItemInfoPanel extends PluginPanel
         }
         else
         {
+            int shown = 0;
             for (ItemInfoClient.DropSource drop : cachedDrops)
             {
+                if (shown >= DROP_DISPLAY_CAP)
+                {
+                    break;
+                }
                 BufferedImage icon = (dropIcons != null && drop.source != null) ? dropIcons.get(drop.source) : null;
                 dropsContent.add(buildDropRow(drop, icon, iconsLoading));
+                shown++;
+            }
+            if (cachedDrops.size() > DROP_DISPLAY_CAP)
+            {
+                JLabel more = makeSourcesInfoLabel("<html>" + wrapTextManually(
+                        "Showing " + DROP_DISPLAY_CAP + " of " + cachedDrops.size()
+                                + " sources - open the wiki for the full list.",
+                        165, FontManager.getRunescapeFont()) + "</html>");
+                more.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+                dropsContent.add(more);
             }
         }
 
-        // Size the scrollpane to fit the actual content up to the cap, so a short list
-        // shows at its natural height (no empty scroll space, no scrollbar) while a long
-        // one caps out and scrolls internally - with the "Drops" header staying fixed
-        // above it either way, since the header lives outside this scrollpane.
+        dropsContent.add(Box.createVerticalGlue());
         dropsContent.revalidate();
-        int contentHeight = dropsContent.getPreferredSize().height;
-        int cappedHeight = Math.min(contentHeight, SOURCES_MAX_HEIGHT);
-        dropsScrollPane.setPreferredSize(new Dimension(10, cappedHeight));
-        dropsScrollPane.setMaximumSize(new Dimension(Integer.MAX_VALUE, cappedHeight));
 
         shopsContent.removeAll();
         if (cachedShops.isEmpty())
@@ -2744,32 +3402,14 @@ public class ItemInfoPanel extends PluginPanel
         }
 
         shopsContent.revalidate();
-        int shopsContentHeight = shopsContent.getPreferredSize().height;
-        int shopsCappedHeight = Math.min(shopsContentHeight, SOURCES_MAX_HEIGHT);
-        shopsScrollPane.setPreferredSize(new Dimension(10, shopsCappedHeight));
-        shopsScrollPane.setMaximumSize(new Dimension(Integer.MAX_VALUE, shopsCappedHeight));
 
         revalidate();
         repaint();
     }
 
-    /**
-     * One drop-source card, laid out as four separate full-width lines - name, then
-     * icon+level (colour-coded relative to the player's own combat level, when it's an
-     * actual monster combat level), then labelled Quantity, then labelled Drop rate. Each
-     * piece gets its own line deliberately: cramming level/quantity/rate onto shared lines
-     * via BorderLayout(WEST/EAST) doesn't reflow when the text is long (quantity ranges
-     * like "100-150 (noted)" collided with the drop rate text), so every line here is
-     * independently wrap-safe instead.
-     */
     private JPanel buildDropRow(ItemInfoClient.DropSource drop, BufferedImage icon, boolean iconLoading)
     {
         JPanel row = new JPanel();
-        // Icon+horizontal layout only applies to NPC drop rows (items), where an icon is
-        // actually possible - monster rows (an item's own drop sources) never get one (see
-        // loadNpcDropIconsAndDisplay's docs for why: no ID-based shortcut exists for
-        // monster icons, only items), so they revert to the original plain vertical stack
-        // rather than wasting a permanently-blank icon column.
         boolean showIcon = npcDropsMode;
         row.setLayout(new BoxLayout(row, showIcon ? BoxLayout.X_AXIS : BoxLayout.Y_AXIS));
         row.setOpaque(false);
@@ -2782,9 +3422,6 @@ public class ItemInfoPanel extends PluginPanel
 
         if (showIcon)
         {
-            // Fixed-size icon slot on the left, Loot Lookup style - kept blank (not hidden)
-            // when this specific item's icon failed to resolve, so it still lines up with
-            // sibling rows that did get one.
             JLabel iconLabel = new JLabel();
             final int iconBoxSize = 32;
             iconLabel.setPreferredSize(new Dimension(iconBoxSize, iconBoxSize));
@@ -2799,11 +3436,6 @@ public class ItemInfoPanel extends PluginPanel
             }
             else if (iconLoading)
             {
-                // Small per-icon busy indicator instead of leaving the slot blank while
-                // this specific item's icon is still resolving - rows render immediately
-                // rather than the whole table waiting on the slowest icon, and this fills
-                // the gap in the meantime. Swapped for the real icon (or left blank on
-                // failure) via updateDropIcon() once the fetch actually completes.
                 iconLabel.setIcon(createSmallSpinnerIcon());
             }
             if (drop.source != null)
@@ -2820,7 +3452,6 @@ public class ItemInfoPanel extends PluginPanel
         textStack.setAlignmentX(Component.LEFT_ALIGNMENT);
         textStack.setAlignmentY(Component.TOP_ALIGNMENT);
 
-        // Wraps narrower when there's an icon column eating into the available width.
         int wrapWidth = showIcon ? 130 : 160;
         String rawName = drop.source != null ? drop.source : "Unknown";
         JLabel nameLabel = new JLabel("<html>" + wrapTextManually(rawName, wrapWidth, FontManager.getRunescapeFont()) + "</html>");
@@ -2828,10 +3459,6 @@ public class ItemInfoPanel extends PluginPanel
         nameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         if (dropRowClickListener != null)
         {
-            // A distinct default color (not plain white) signals this name is clickable
-            // before the user even hovers over it - matches the classic "hyperlink blue"
-            // convention, reusing the same light blue already used for "Always" rarity
-            // rather than introducing a new arbitrary color.
             nameLabel.setForeground(ALWAYS_COLOR);
             nameLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
             nameLabel.addMouseListener(new MouseAdapter()
@@ -2861,16 +3488,13 @@ public class ItemInfoPanel extends PluginPanel
         }
         textStack.add(nameLabel);
 
-        // Some sub-locations are themselves just a level indicator (e.g. "Black Guard#Level
-        // 25" formats to "Black Guard (Level 25)"), which would otherwise show the same
-        // level twice once we add our own "(Lvl 25)" line - skip the separate line in that
-        // case rather than showing "Black Guard (Level 25)" followed by "(Lvl 25)".
         boolean levelAlreadyShown = drop.level != null
                 && rawName.toLowerCase().contains("level " + drop.level.toLowerCase());
 
         if (drop.level != null && !drop.level.isEmpty() && !levelAlreadyShown)
         {
-            JLabel levelLabel = new JLabel("(Lvl " + drop.level + ")");
+            String levelText = "(Lvl " + formatDropLevel(drop.level) + ")";
+            JLabel levelLabel = new JLabel("<html>" + wrapTextManually(levelText, wrapWidth, FontManager.getRunescapeFont()) + "</html>");
             levelLabel.setFont(FontManager.getRunescapeFont());
             levelLabel.setForeground(combatLevelColor(drop));
             levelLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -2905,34 +3529,24 @@ public class ItemInfoPanel extends PluginPanel
         }
         else
         {
-            // No icon column, so the text stack's own components are added directly to
-            // the row rather than nesting an extra panel - matches the original structure
-            // exactly rather than just visually resembling it.
             for (Component c : textStack.getComponents())
             {
                 row.add(c);
             }
         }
 
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
         return row;
     }
 
-    /**
-     * The wiki's quantity ranges use an en dash ("5\u201314"); swapped for a plain hyphen
-     * here since that's what was asked for and it's also just a more common, easier to
-     * read/type character in a UI context.
-     */
     private String formatQuantity(String rawQuantity)
     {
         if (rawQuantity == null)
         {
             return "-";
         }
-        String normalized = rawQuantity.replace("\u2013", "-").replace("\u2014", "-");
+        String normalized = rawQuantity.replace("–", "-").replace("—", "-");
 
-        // Quantities can be a single number ("2500") or a range ("1000-5000") - format
-        // each numeric part with comma separators individually, rejoining with "-",
-        // rather than trying to parse the whole string as one number.
         String[] parts = normalized.split("-");
         StringBuilder result = new StringBuilder();
         for (int i = 0; i < parts.length; i++)
@@ -2954,11 +3568,6 @@ public class ItemInfoPanel extends PluginPanel
         return result.toString();
     }
 
-    // Exact anchor points from the wiki's own "Combat level" page ("Displayed colours"
-    // table): level difference -> hex code. Values between these anchors in the official
-    // table aren't perfectly linear (they look hand-picked to round hex bytes), but this
-    // is close enough to be visually identical, and beyond +-10 the table caps at the pure
-    // red/green endpoints.
     private static final int[] COMBAT_DIFF_ANCHORS = {-10, -8, -5, -2, 0, 2, 5, 8, 10};
     private static final Color[] COMBAT_COLOR_ANCHORS = {
             new Color(0x00, 0xff, 0x00),
@@ -2972,18 +3581,42 @@ public class ItemInfoPanel extends PluginPanel
             new Color(0xff, 0x00, 0x00),
     };
 
-    /**
-     * Colour-codes a monster's combat level relative to the player's own, using the exact
-     * anchor colours published on the wiki's own "Combat level" page ("Displayed colours"
-     * table) rather than an approximated gradient. Falls back to neutral gray whenever the
-     * comparison wouldn't make sense: no player level available yet, the drop isn't from
-     * monster combat (skilling/reward sources have levels too, just not combat ones), or
-     * the level string isn't a plain number (or comma-separated list of them, e.g.
-     * "86,104,109" for a monster with several regional variants - the average of those is
-     * used for the gradient position). The wiki's "Cannot attack" -> white case is specific
-     * to the Wilderness PvP level-bracket restriction between players, which doesn't apply
-     * to monster drop levels, so it's intentionally not reproduced here.
-     */
+    private String formatDropLevel(String level)
+    {
+        if (level == null)
+        {
+            return "";
+        }
+        boolean haveNum = false;
+        int min = Integer.MAX_VALUE;
+        int max = Integer.MIN_VALUE;
+        int count = 0;
+        for (String part : level.split("[,/]"))
+        {
+            String t = part.trim();
+            if (t.isEmpty())
+            {
+                continue;
+            }
+            try
+            {
+                int v = (int) Math.round(Double.parseDouble(t));
+                min = Math.min(min, v);
+                max = Math.max(max, v);
+                count++;
+                haveNum = true;
+            }
+            catch (NumberFormatException ignored)
+            {
+            }
+        }
+        if (!haveNum || count <= 1)
+        {
+            return level.trim();
+        }
+        return min == max ? String.valueOf(min) : (min + "-" + max);
+    }
+
     private Color combatLevelColor(ItemInfoClient.DropSource drop)
     {
         if (drop.level == null || !"combat".equalsIgnoreCase(drop.dropType))
@@ -2993,11 +3626,6 @@ public class ItemInfoPanel extends PluginPanel
         return combatLevelColorForLevel(drop.level);
     }
 
-    /**
-     * Same combat-level colour gradient as the drops list, but taking a plain level string
-     * directly - used for the NPC Properties "Combat level" row, which isn't tied to a
-     * DropSource/dropType at all.
-     */
     private Color combatLevelColorForLevel(String levelStr)
     {
         if (playerCombatLevel <= 0 || levelStr == null)
@@ -3044,8 +3672,6 @@ public class ItemInfoPanel extends PluginPanel
                 return lerpColor(COMBAT_COLOR_ANCHORS[i], COMBAT_COLOR_ANCHORS[i + 1], t);
             }
         }
-        // Unreachable in practice (every value is covered by the cap checks and loop above),
-        // but returns the diff=0 anchor (yellow) rather than leaving this an ambiguous path.
         return COMBAT_COLOR_ANCHORS[4];
     }
 
@@ -3068,14 +3694,6 @@ public class ItemInfoPanel extends PluginPanel
         return raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
-    /**
-     * Manually wraps text into multiple lines (joined with "&lt;br&gt;") using actual font
-     * measurements, instead of relying on a CSS "width" on an HTML div - that approach was
-     * tried twice for these row names and didn't reliably wrap inside a nested
-     * JScrollPane's viewport, so this sidesteps Swing's HTML/CSS layout quirks entirely by
-     * computing the exact break points ourselves. Expects raw (non-HTML-escaped) text and
-     * returns HTML-safe output.
-     */
     private String wrapTextManually(String text, int maxWidthPx, Font font)
     {
         FontMetrics metrics = getFontMetrics(font);
@@ -3084,11 +3702,6 @@ public class ItemInfoPanel extends PluginPanel
 
         for (String word : text.split(" "))
         {
-            // A single space-delimited "word" can itself be wider than the whole
-            // available line (e.g. a drop rate like "1/6,729.23" has no spaces inside it
-            // to wrap at) - these were overflowing straight past the panel edge instead
-            // of wrapping. Break it character-by-character in that case, rather than
-            // relying on space-splitting alone.
             if (metrics.stringWidth(word) > maxWidthPx)
             {
                 if (currentLine.length() > 0)
@@ -3151,11 +3764,6 @@ public class ItemInfoPanel extends PluginPanel
         return result.toString();
     }
 
-    /**
-     * One shop-source card: shop name on its own wrapped line, price below it - matches
-     * the same collision fix applied to drop rows (BorderLayout WEST/EAST doesn't reflow
-     * when the shop name is long enough to run into the price).
-     */
     private JPanel buildShopRow(ItemInfoClient.ShopSource shop)
     {
         JPanel row = new JPanel();
@@ -3188,8 +3796,6 @@ public class ItemInfoPanel extends PluginPanel
         }
         else if (isFlagged)
         {
-            // Don't tack " gp"/currency onto the sanity-check message - "Unavailable
-            // (data error) gp" reads oddly.
             priceText = "Price: " + formattedPrice;
         }
         else if (isCoins)
@@ -3198,8 +3804,6 @@ public class ItemInfoPanel extends PluginPanel
         }
         else
         {
-            // Non-GP currency (Slayer Rewards points, minigame tokens, etc.) - show the
-            // wiki's own currency label rather than assuming everything is coins.
             priceText = "Price: " + formattedPrice + " " + shop.currency;
         }
 
@@ -3209,9 +3813,6 @@ public class ItemInfoPanel extends PluginPanel
         priceLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         if (isCoins && !isFlagged)
         {
-            // The coin icon specifically implies a real GP value - showing it next to a
-            // points price or a flagged data-error message would be misleading, so it's
-            // only used for actual, sane Coins-based prices.
             priceLabel.setIcon(coinIcon());
             priceLabel.setIconTextGap(6);
         }
@@ -3221,23 +3822,12 @@ public class ItemInfoPanel extends PluginPanel
         return row;
     }
 
-    /**
-     * Builds the drop-rate label with colour-coded text - no underline (it read as messy
-     * against the RuneScape font at this size), just the color coding to distinguish
-     * "Always" from numeric rates.
-     */
     private JLabel buildRarityLabel(String rarity, int wrapWidth)
     {
         String display = (rarity != null && !rarity.isEmpty()) ? rarity : "-";
         display = addThousandsCommas(display);
 
-        // Bold variant at a slightly larger size, rather than the regular weight - the
-        // extra stroke weight makes dense fraction numbers like "1/8,192" easier to read
-        // while staying in the RuneScape font family.
-        Font rarityFont = FontManager.getRunescapeBoldFont().deriveFont(15f);
-        // No "Drop rate:" label anymore - the value alone is enough in context (this is
-        // already inside a "Drops" section), and dropping the label frees up a full line
-        // per row plus more width for the value itself, avoiding awkward wraps.
+        Font rarityFont = FontManager.getRunescapeBoldFont();
         String wrappedValue = wrapTextManually(display, wrapWidth, rarityFont);
         JLabel label = new JLabel("<html>" + wrappedValue + "</html>");
         label.setFont(rarityFont);
@@ -3245,11 +3835,6 @@ public class ItemInfoPanel extends PluginPanel
         return label;
     }
 
-    /**
-     * Finds every number in a string and adds comma thousand-separators to any that are
-     * 1000 or over (e.g. "1/8192" -> "1/8,192", "7 x 1/2448" -> "7 x 1/2,448"), leaving
-     * smaller numbers and everything else in the string untouched.
-     */
     private String addThousandsCommas(String text)
     {
         Matcher matcher = Pattern.compile("\\d+(\\.\\d+)?").matcher(text);
@@ -3288,12 +3873,6 @@ public class ItemInfoPanel extends PluginPanel
         return result.toString();
     }
 
-    /**
-     * Approximate colour grading for the Rarity text, loosely modelled on the wiki's own
-     * "Always" (blue) vs numeric-rarity (green, more saturated for commoner drops) scheme.
-     * This isn't pixel-identical to the wiki's own gradient (which isn't published anywhere),
-     * but gives the same at-a-glance read of "how likely is this drop".
-     */
     private Color rarityColor(String rarity)
     {
         if (rarity == null || rarity.isEmpty() || rarity.equals("-"))
@@ -3307,10 +3886,6 @@ public class ItemInfoPanel extends PluginPanel
             return ALWAYS_COLOR;
         }
 
-        // Pull the effective odds out of fraction strings like "3/128", "1/9.846", or
-        // "5/128; 1/8,192" - dividing denominator by numerator normalizes "3/128" to the
-        // same "1-in-N" scale as "1/N" so a 3/128 drop and a roughly-equivalent 1/43 drop
-        // grade to the same colour band.
         Matcher matcher = Pattern.compile("([0-9,.]+)/([0-9,.]+)").matcher(rarity);
         Double bestOdds = null;
         while (matcher.find())
@@ -3353,10 +3928,6 @@ public class ItemInfoPanel extends PluginPanel
             return RARITY_UNKNOWN;
         }
 
-        // Thresholds are my own judgment call (OSRS has no official rarity-tier cutoffs
-        // published anywhere) - roughly: common enough to see regularly, uncommon but not
-        // unusual to still get within a session, genuinely rare (most "unique" boss drops
-        // land here), and legendary/"insane rarity" tier (pets, mega-rare uniques).
         if (denominator <= 50)
         {
             return RARITY_COMMON;
@@ -3384,8 +3955,14 @@ public class ItemInfoPanel extends PluginPanel
     {
         ensureItemViewShown();
         nameLabel.setText("<html>" + wrapTextManually(name, 140, headerNameFont(name)) + "</html>");
+        priceSubLabel.setIcon(null);
+        priceSubLabel.setText("");
         showLoadingImage();
         infoTable.removeAll();
+        priceGraphPanel.setVisible(false);
+        sparkline.setData(null, null);
+        priceTicker.setSegments(null);
+        priceTicker.setVisible(false);
         updatePropertiesVisibility();
         lastFullDescription = "Loading description...";
         descriptionArea.setText(lastFullDescription);
@@ -3428,13 +4005,6 @@ public class ItemInfoPanel extends PluginPanel
 
         descriptionArea.setCaretPosition(0);
 
-        // JTextArea's preferred height with word-wrap needs a known width to calculate the
-        // wrapped line count - it can't just be asked for its preferred size the way a plain
-        // BoxLayout panel of rows can (like Drops/Shops), since on the very first render the
-        // component may not have been through a layout pass yet and would report width 0,
-        // producing a wrong (single-line-ish) height. Forcing a width explicitly first side-
-        // steps that: use the real width once the panel has been laid out at least once,
-        // otherwise fall back to the sidebar's typical content width.
         int width = descriptionArea.getWidth();
         if (width <= 0)
         {
@@ -3442,20 +4012,27 @@ public class ItemInfoPanel extends PluginPanel
         }
         descriptionArea.setSize(width, Short.MAX_VALUE);
 
-        int contentHeight = descriptionArea.getPreferredSize().height;
-        int cappedHeight = Math.min(contentHeight, DESCRIPTION_MAX_HEIGHT);
-        descriptionScrollPane.setPreferredSize(new Dimension(10, cappedHeight));
-        descriptionScrollPane.setMaximumSize(new Dimension(Integer.MAX_VALUE, cappedHeight));
+        int textH = descriptionArea.getPreferredSize().height;
+        if (showFullDescription)
+        {
+
+            descriptionScrollPane.setPreferredSize(new Dimension(10, Math.min(textH + 4, 160)));
+            descriptionScrollPane.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+            descriptionTail.setMaximumSize(new Dimension(Integer.MAX_VALUE, 0));
+        }
+        else
+        {
+
+            int boxH = Math.max(24, textH + 4);
+            descriptionScrollPane.setPreferredSize(new Dimension(10, boxH));
+            descriptionScrollPane.setMaximumSize(new Dimension(Integer.MAX_VALUE, boxH));
+            descriptionTail.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        }
 
         revalidate();
         repaint();
     }
 
-    /**
-     * Renders the read-more/read-less label with the correct text and icon for the current
-     * expand state (down arrow = more to reveal, up arrow = collapse it back), plus a
-     * brighter color while the mouse is hovering it.
-     */
     private void updateReadMoreLabel()
     {
         String text = showFullDescription ? "Read less" : "Read more";
@@ -3478,10 +4055,6 @@ public class ItemInfoPanel extends PluginPanel
         int origWidth = image.getWidth();
         int origHeight = image.getHeight();
 
-        // Capped at 1.5x - unrestricted upscaling of these small pixel-art sprites was
-        // what caused the pixelated look, but a hard 1.0x cap (no upscale at all) made
-        // them look too small in the box. 1.5x is a middle ground: still noticeably
-        // sharper than stretching all the way to fill 60px, without looking tiny.
         double scale = Math.min(1.5, Math.min((double) boxSize / origWidth, (double) boxSize / origHeight));
         int scaledWidth = Math.max(1, (int) (origWidth * scale));
         int scaledHeight = Math.max(1, (int) (origHeight * scale));
@@ -3489,29 +4062,20 @@ public class ItemInfoPanel extends PluginPanel
         BufferedImage canvas = new BufferedImage(boxSize, boxSize, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = canvas.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        // Bicubic interpolation for the image itself - drawing the original image
-        // directly at the target size (rather than pre-scaling via the older
-        // getScaledInstance() API first) avoids both a pixelated result and a subtle
-        // centering mismatch that could happen when that API's returned image didn't
-        // perfectly match the requested dimensions.
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
 
         RoundRectangle2D frameShape = new RoundRectangle2D.Float(0.5f, 0.5f, boxSize - 1, boxSize - 1, 10, 10);
 
-        // Subtle card-style background behind the item so smaller/odd-shaped sprites
-        // still sit inside a clean, consistent frame.
         g.setColor(new Color(255, 255, 255, 18));
         g.fill(frameShape);
 
-        // Clip to the rounded frame so the image itself picks up rounded corners.
         g.setClip(frameShape);
         int x = (boxSize - scaledWidth) / 2;
         int y = (boxSize - scaledHeight) / 2;
         g.drawImage(image, x, y, scaledWidth, scaledHeight, null);
         g.setClip(null);
 
-        // Soft border on top to finish the frame.
         g.setColor(new Color(255, 255, 255, 55));
         g.setStroke(new BasicStroke(1.2f));
         g.draw(frameShape);
@@ -3522,13 +4086,510 @@ public class ItemInfoPanel extends PluginPanel
         scrollToTop();
     }
 
+    private static class WidthTrackingPanel extends JPanel implements Scrollable
+    {
+        @Override
+        public Dimension getPreferredScrollableViewportSize()
+        {
+            return getPreferredSize();
+        }
+
+        @Override
+        public int getScrollableUnitIncrement(Rectangle visibleRect, int orientation, int direction)
+        {
+            return 16;
+        }
+
+        @Override
+        public int getScrollableBlockIncrement(Rectangle visibleRect, int orientation, int direction)
+        {
+            return orientation == SwingConstants.VERTICAL ? visibleRect.height : visibleRect.width;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportWidth()
+        {
+            return true;
+        }
+
+        @Override
+        public boolean getScrollableTracksViewportHeight()
+        {
+            return false;
+        }
+    }
+
     /**
-     * A simple rounded-rectangle outline border - Swing's built-in
-     * BorderFactory.createMatteBorder/createLineBorder only draw sharp, square corners,
-     * with no built-in option for rounded ones. Used for the "Report Issues or Support the
-     * Developer" row specifically, at the user's request for a softer look than the
-     * previous sharp-cornered box.
+     * Sizes itself to the viewport height whenever its sections can fit (i.e. the viewport is at
+     * least the minimum height), so the BoxLayout distributes that height among the sections -
+     * shrinking the tall ones (which then scroll internally) instead of overflowing into an outer
+     * scrollbar. Only when the viewport is smaller than the minimum does it fall back to its
+     * preferred height and let the outer scroll take over.
      */
+    private static class SharedHeightPanel extends WidthTrackingPanel
+    {
+        @Override
+        public boolean getScrollableTracksViewportHeight()
+        {
+            Container parent = getParent();
+            if (parent instanceof JViewport)
+            {
+                return parent.getHeight() >= getMinimumSize().height;
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Stacks its visible children vertically and splits the container height into equal shares.
+     * A child that needs less than its share takes only what it needs and returns the surplus,
+     * which is redistributed equally among the children that still want more (equal water-fill).
+     * So when every section is full each gets a third; when some are short the tall ones split the
+     * rest evenly; and when everything fits, each keeps its natural height with the leftover left
+     * at the bottom.
+     */
+    private static class EqualShareLayout implements LayoutManager
+    {
+        private final int vgap;
+
+        EqualShareLayout(int vgap)
+        {
+            this.vgap = vgap;
+        }
+
+        @Override
+        public void addLayoutComponent(String name, Component comp)
+        {
+        }
+
+        @Override
+        public void removeLayoutComponent(Component comp)
+        {
+        }
+
+        private java.util.List<Component> visible(Container parent)
+        {
+            java.util.List<Component> list = new ArrayList<>();
+            for (Component c : parent.getComponents())
+            {
+                if (c.isVisible())
+                {
+                    list.add(c);
+                }
+            }
+            return list;
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container parent)
+        {
+            Insets in = parent.getInsets();
+            java.util.List<Component> vis = visible(parent);
+            int h = in.top + in.bottom;
+            int w = 0;
+            for (Component c : vis)
+            {
+                Dimension d = c.getPreferredSize();
+                h += d.height;
+                w = Math.max(w, d.width);
+            }
+            if (vis.size() > 1)
+            {
+                h += (vis.size() - 1) * vgap;
+            }
+            return new Dimension(w + in.left + in.right, h);
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container parent)
+        {
+            Insets in = parent.getInsets();
+            java.util.List<Component> vis = visible(parent);
+            int h = in.top + in.bottom;
+            int w = 0;
+            for (Component c : vis)
+            {
+                h += c.getMinimumSize().height;
+                w = Math.max(w, c.getPreferredSize().width);
+            }
+            if (vis.size() > 1)
+            {
+                h += (vis.size() - 1) * vgap;
+            }
+            return new Dimension(w + in.left + in.right, h);
+        }
+
+        @Override
+        public void layoutContainer(Container parent)
+        {
+            Insets in = parent.getInsets();
+            java.util.List<Component> vis = visible(parent);
+            int n = vis.size();
+            if (n == 0)
+            {
+                return;
+            }
+            int width = parent.getWidth() - in.left - in.right;
+            int available = parent.getHeight() - in.top - in.bottom - (n - 1) * vgap;
+
+            int[] heights = new int[n];
+            boolean[] fixed = new boolean[n];
+            int remaining = available;
+            int count = n;
+            boolean changed = true;
+            while (changed && count > 0)
+            {
+                changed = false;
+                int share = remaining / Math.max(count, 1);
+                for (int i = 0; i < n; i++)
+                {
+                    if (fixed[i])
+                    {
+                        continue;
+                    }
+                    int natural = vis.get(i).getPreferredSize().height;
+                    if (natural <= share)
+                    {
+                        heights[i] = natural;
+                        fixed[i] = true;
+                        remaining -= natural;
+                        count--;
+                        changed = true;
+                    }
+                }
+            }
+            if (count > 0)
+            {
+                int share = remaining / count;
+                int extra = remaining - share * count;
+                for (int i = 0; i < n; i++)
+                {
+                    if (!fixed[i])
+                    {
+                        heights[i] = share + (extra > 0 ? 1 : 0);
+                        if (extra > 0)
+                        {
+                            extra--;
+                        }
+                    }
+                }
+            }
+
+            int y = in.top;
+            for (int i = 0; i < n; i++)
+            {
+                vis.get(i).setBounds(in.left, y, width, heights[i]);
+                y += heights[i] + vgap;
+            }
+        }
+    }
+
+    private static class RoundedPanel extends JPanel
+    {
+        private final Color fill;
+        private final Color borderColor;
+        private final int radius;
+
+        RoundedPanel(Color fill, Color borderColor, int radius)
+        {
+            this.fill = fill;
+            this.borderColor = borderColor;
+            this.radius = radius;
+            setOpaque(false);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            RoundRectangle2D shape = new RoundRectangle2D.Float(0, 0, getWidth() - 1, getHeight() - 1, radius, radius);
+            g2.setColor(fill);
+            g2.fill(shape);
+            g2.setColor(borderColor);
+            g2.draw(shape);
+            g2.dispose();
+            super.paintComponent(g);
+        }
+    }
+
+    private static class Sparkline extends JComponent
+    {
+        private java.util.List<Integer> data;
+        private java.util.List<Long> times;
+        private int hover = -1;
+        private int prefH = 210;
+        private static final Color LINE = new Color(255, 184, 63);
+        private static final int DATE_H = 14;
+
+        Sparkline()
+        {
+            addMouseMotionListener(new java.awt.event.MouseMotionAdapter()
+            {
+                @Override
+                public void mouseMoved(MouseEvent e)
+                {
+                    hover = indexAt(e.getX());
+                    repaint();
+                }
+            });
+            addMouseListener(new MouseAdapter()
+            {
+                @Override
+                public void mouseExited(MouseEvent e)
+                {
+                    hover = -1;
+                    repaint();
+                }
+            });
+        }
+
+        void setData(java.util.List<Integer> data, java.util.List<Long> times)
+        {
+            this.data = data;
+            this.times = times;
+            this.hover = -1;
+            repaint();
+        }
+
+        private int indexAt(int px)
+        {
+            if (data == null || data.size() < 2)
+            {
+                return -1;
+            }
+            int n = data.size();
+            int w = Math.max(1, getWidth() - 1);
+            int idx = (int) Math.round((double) px / w * (n - 1));
+            return Math.max(0, Math.min(n - 1, idx));
+        }
+
+        void setPreferredHeight(int h)
+        {
+            this.prefH = h;
+            revalidate();
+        }
+
+        @Override
+        public Dimension getPreferredSize()
+        {
+            return new Dimension(100, prefH);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            if (data == null || data.size() < 2)
+            {
+                return;
+            }
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int w = getWidth();
+            int h = getHeight();
+            int graphH = h - DATE_H;
+            int n = data.size();
+            int min = Integer.MAX_VALUE;
+            int max = Integer.MIN_VALUE;
+            for (int v : data)
+            {
+                min = Math.min(min, v);
+                max = Math.max(max, v);
+            }
+            double range = Math.max(1, max - min);
+
+            int topPad = 24;
+            int yBottom = graphH - 3;
+            double plotSpan = Math.max(1, yBottom - topPad);
+            int[] xs = new int[n];
+            int[] ys = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                xs[i] = (int) ((double) i / (n - 1) * (w - 1));
+                ys[i] = (int) (yBottom - (data.get(i) - min) / range * plotSpan);
+            }
+
+            Polygon area = new Polygon();
+            area.addPoint(0, graphH);
+            for (int i = 0; i < n; i++)
+            {
+                area.addPoint(xs[i], ys[i]);
+            }
+            area.addPoint(w - 1, graphH);
+            g2.setColor(new Color(255, 184, 63, 45));
+            g2.fillPolygon(area);
+
+            g2.setColor(LINE);
+            g2.setStroke(new BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            for (int i = 1; i < n; i++)
+            {
+                g2.drawLine(xs[i - 1], ys[i - 1], xs[i], ys[i]);
+            }
+
+            if (hover >= 0 && hover < n)
+            {
+                int hx = xs[hover];
+                int hy = ys[hover];
+                g2.setColor(new Color(255, 255, 255, 60));
+                g2.setStroke(new BasicStroke(1f));
+                g2.drawLine(hx, 0, hx, graphH);
+                g2.setColor(LINE);
+                g2.fillOval(hx - 2, hy - 2, 5, 5);
+
+                Font f = FontManager.getRunescapeSmallFont();
+                g2.setFont(f);
+                FontMetrics fm = g2.getFontMetrics();
+
+                String priceStr = String.format("%,d gp", data.get(hover));
+                int pw = fm.stringWidth(priceStr);
+                int px = Math.max(1, Math.min(w - pw - 1, hx - pw / 2));
+                g2.setColor(Color.WHITE);
+                g2.drawString(priceStr, px, 13);
+
+                if (times != null && hover < times.size())
+                {
+
+                    long span = times.size() >= 2 ? (times.get(times.size() - 1) - times.get(0)) : 0;
+                    String pattern = (span > 0 && span <= 129600) ? "HH:mm" : "d MMM";
+                    String dateStr = new java.text.SimpleDateFormat(pattern).format(new java.util.Date(times.get(hover) * 1000L));
+                    int dw = fm.stringWidth(dateStr);
+                    int dx = Math.max(1, Math.min(w - dw - 1, hx - dw / 2));
+                    g2.setColor(new Color(180, 168, 140));
+                    g2.drawString(dateStr, dx, h - 3);
+                }
+            }
+            g2.dispose();
+        }
+    }
+
+    private static class Ticker extends JComponent
+    {
+        static class Seg
+        {
+            String label;
+            double pct;
+        }
+
+        private java.util.List<Seg> segs = new java.util.ArrayList<>();
+        private double offset = 0;
+        private final javax.swing.Timer timer;
+        private static final int GAP = 26;
+        private static final Color UP = new Color(95, 220, 99);
+        private static final Color DOWN = new Color(255, 81, 64);
+        private static final Color LABEL = new Color(179, 166, 132);
+
+        Ticker()
+        {
+            setPreferredSize(new Dimension(100, 20));
+            setMaximumSize(new Dimension(Integer.MAX_VALUE, 20));
+            timer = new javax.swing.Timer(33, e ->
+            {
+                offset += 0.7;
+                repaint();
+            });
+        }
+
+        void setSegments(java.util.List<Seg> segments)
+        {
+            this.segs = segments != null ? segments : new java.util.ArrayList<>();
+            offset = 0;
+
+            if (this.segs.isEmpty())
+            {
+                timer.stop();
+            }
+            else
+            {
+                timer.start();
+            }
+            repaint();
+        }
+
+        @Override
+        public void addNotify()
+        {
+            super.addNotify();
+            if (!segs.isEmpty())
+            {
+                timer.start();
+            }
+        }
+
+        @Override
+        public void removeNotify()
+        {
+            timer.stop();
+            super.removeNotify();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            if (segs.isEmpty())
+            {
+                return;
+            }
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            Font f = FontManager.getRunescapeBoldFont();
+            g2.setFont(f);
+            FontMetrics fm = g2.getFontMetrics();
+
+            int total = 0;
+            for (Seg s : segs)
+            {
+                total += segWidth(s, fm) + GAP;
+            }
+            if (total <= 0)
+            {
+                g2.dispose();
+                return;
+            }
+
+            int baseline = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
+            int x = (int) (-(offset % total));
+            while (x < getWidth())
+            {
+                for (Seg s : segs)
+                {
+                    x = drawSeg(g2, s, x, baseline, fm);
+                    x += GAP;
+                }
+            }
+            g2.dispose();
+        }
+
+        private int segWidth(Seg s, FontMetrics fm)
+        {
+            return fm.stringWidth(s.label + "  " + arrowText(s) + fmtPct(s));
+        }
+
+        private String arrowText(Seg s)
+        {
+            return s.pct >= 0 ? "▲ " : "▼ ";
+        }
+
+        private String fmtPct(Seg s)
+        {
+            return String.format("%+.1f%%", s.pct);
+        }
+
+        private int drawSeg(Graphics2D g2, Seg s, int x, int baseline, FontMetrics fm)
+        {
+            String label = s.label + "  ";
+            g2.setColor(LABEL);
+            g2.drawString(label, x, baseline);
+            x += fm.stringWidth(label);
+
+            String move = arrowText(s) + fmtPct(s);
+            g2.setColor(s.pct >= 0 ? UP : DOWN);
+            g2.drawString(move, x, baseline);
+            x += fm.stringWidth(move);
+            return x;
+        }
+    }
+
     private static class RoundedLineBorder implements Border
     {
         private final Color color;
