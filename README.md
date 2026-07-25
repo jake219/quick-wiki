@@ -25,7 +25,7 @@ Examining something in game tells you almost nothing. What drops it? What's the 
 - Click any monster or item to jump to its page, with back and home buttons to retrace your steps.
 
 <p align="center">
-  <img src="panel.gif" width="280" alt="The panel">
+  <img src="panel.gif" width="250" alt="The panel">
 </p>
 
 The drops, shops, and recipe lists share the panel so you can see all of them at once, and you can collapse whichever ones you don't need.
