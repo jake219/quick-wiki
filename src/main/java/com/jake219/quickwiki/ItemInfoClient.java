@@ -177,6 +177,7 @@ public class ItemInfoClient
         public String price;
 
         public String currency;
+        public String stock;
     }
 
     public static class Material
@@ -1070,7 +1071,7 @@ public class ItemInfoClient
 
     private void fetchShopSources(String itemName, Consumer<List<ShopSource>> callback)
     {
-        String query = "bucket('storeline').select('sold_by','store_sell_price','store_currency')"
+        String query = "bucket('storeline').select('sold_by','store_sell_price','store_currency','store_stock')"
                 + ".where('sold_item','" + escapeForBucketQuery(itemName) + "').limit(500).run()";
 
         runBucketQuery(query, root ->
@@ -1088,6 +1089,7 @@ public class ItemInfoClient
                         ss.shopName = firstString(row, "sold_by");
                         ss.price = firstString(row, "store_sell_price");
                         ss.currency = firstString(row, "store_currency");
+                        ss.stock = firstString(row, "store_stock");
 
                         if (ss.shopName != null)
                         {
@@ -1436,6 +1438,7 @@ public class ItemInfoClient
         String value = el.getAsString();
         return value.isEmpty() ? null : value;
     }
+
 
     public void resolveExactItemIdStrict(String itemName, Consumer<Integer> callback)
     {

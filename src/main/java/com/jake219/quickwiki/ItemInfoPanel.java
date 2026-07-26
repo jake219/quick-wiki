@@ -427,7 +427,6 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         JPanel actionsRow = new JPanel(new BorderLayout());
         actionsRow.setOpaque(false);
         actionsRow.add(readMoreLabel, BorderLayout.WEST);
-        actionsRow.add(backToTopLabel, BorderLayout.EAST);
         actionsRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         actionsRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 20));
 
@@ -440,6 +439,9 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         descriptionScrollPane.getVerticalScrollBar().setUnitIncrement(16);
         enableScrollChaining(descriptionScrollPane);
         descriptionScrollPane.setAlignmentX(Component.LEFT_ALIGNMENT);
+        // Small preferred height so the description fills the space under the graph and scrolls
+        // internally, keeping the panel viewport-sized and the footer pinned.
+        descriptionScrollPane.setPreferredSize(new Dimension(10, 90));
 
         descriptionContent = new JPanel();
         descriptionContent.setLayout(new BoxLayout(descriptionContent, BoxLayout.Y_AXIS));
@@ -457,10 +459,16 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
         descriptionPanel = cardFilling(descriptionHeaderLabel, "Description", descriptionContent);
 
-        tabContent.put(TAB_STATS, propertiesPanel);
+        // The Info tab holds the properties + price graph on top and the description below it,
+        // filling the rest and scrolling on its own.
+        JPanel infoTab = new JPanel(new BorderLayout(0, 10));
+        infoTab.setOpaque(false);
+        infoTab.add(propertiesPanel, BorderLayout.NORTH);
+        infoTab.add(descriptionPanel, BorderLayout.CENTER);
+
+        tabContent.put(TAB_STATS, infoTab);
         tabContent.put(TAB_COMBAT, buildCombatStatsSection());
         tabContent.put(TAB_SOURCES, itemSourcesPanel);
-        tabContent.put(TAB_INFO, descriptionPanel);
 
         tabBar = new JPanel();
         tabBar.setOpaque(false);
@@ -539,7 +547,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
     }
 
     private static final String PLUGIN_REPO_URL = "https://github.com/jake219/quick-wiki/blob/main/README.md";
-    private static final String PLUGIN_VERSION = "2.0.1";
+    private static final String PLUGIN_VERSION = "2.0.2";
 
     private JPanel buildEmptyStatePanel()
     {
@@ -571,6 +579,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setOpaque(false);
         panel.setBorder(BorderFactory.createEmptyBorder(48, 16, 16, 16));
+
         panel.add(title);
         panel.add(Box.createVerticalStrut(4));
         panel.add(version);
@@ -582,6 +591,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         panel.add(buildSupportRow());
         return panel;
     }
+
 
     private JPanel buildSupportRow()
     {
@@ -876,7 +886,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         }
         catch (Exception e)
         {
-            log.warn("Quick Wiki: failed to open {}", url, e);
+            /*x*/;
         }
     }
 
@@ -1868,7 +1878,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         tabButtons.clear();
 
         List<String[]> tabs = new ArrayList<>();
-        tabs.add(new String[]{TAB_STATS, "Stats"});
+        tabs.add(new String[]{TAB_STATS, "Info"});
         if (combatTabVisible)
         {
             tabs.add(new String[]{TAB_COMBAT, "Combat"});
@@ -1877,7 +1887,6 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         {
             tabs.add(new String[]{TAB_SOURCES, "Sources"});
         }
-        tabs.add(new String[]{TAB_INFO, "Info"});
 
         tabBar.setLayout(new GridLayout(1, tabs.size(), 3, 0));
         for (String[] t : tabs)
@@ -1941,11 +1950,6 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
                 g2.setColor(color);
                 switch (key)
                 {
-                    case TAB_STATS:
-                        g2.fillRect(x + 1, y + 8, 3, 6);
-                        g2.fillRect(x + 6, y + 4, 3, 10);
-                        g2.fillRect(x + 11, y + 6, 3, 8);
-                        break;
                     case TAB_COMBAT:
 
                         g2.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
@@ -3818,6 +3822,17 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         }
         row.add(Box.createVerticalStrut(2));
         row.add(priceLabel);
+
+        if (shop.stock != null && !shop.stock.trim().isEmpty())
+        {
+            boolean noStock = "0".equals(shop.stock.trim());
+            JLabel stockLabel = new JLabel("Stock: " + shop.stock.trim());
+            stockLabel.setFont(FontManager.getRunescapeFont());
+            stockLabel.setForeground(noStock ? RED : Color.WHITE);
+            stockLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+            row.add(Box.createVerticalStrut(2));
+            row.add(stockLabel);
+        }
 
         return row;
     }

@@ -549,14 +549,16 @@ public class ItemInfoPlugin extends Plugin
 
     private void setupCombatStatsButton(String pageName, String equipable, int itemId, int myGen)
     {
-        panel.setCombatStatsSectionVisible(true);
         boolean isEquipable = equipable != null && equipable.trim().equalsIgnoreCase("Yes");
         if (!isEquipable)
         {
+            // Non-equipable items have no combat stats, so hide the Combat tab entirely.
+            panel.setCombatStatsSectionVisible(false);
             panel.setCombatStatsAvailable(null);
             return;
         }
 
+        panel.setCombatStatsSectionVisible(true);
         panel.setCombatStatsAvailable(() ->
                 itemInfoClient.fetchCombatBonuses(pageName, itemId, bonuses ->
                         clientThread.invoke(() ->
