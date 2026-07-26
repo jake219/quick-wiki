@@ -8,10 +8,6 @@
 
 Stop alt-tabbing to the wiki. Right-click an item, NPC, or object, hit **Wiki**, and the stuff you'd normally go look up shows up in a panel right in the client: price, drops, how it's made, all of it.
 
-<p align="center">
-  <img src="images/item-sources.gif" width="380" alt="Quick Wiki in action">
-</p>
-
 Examining something in game tells you almost nothing. What drops it? What's the alch? What do I need to make it? That's usually a browser tab and a break from whatever you were doing. This keeps it next to the game instead.
 
 ## What you get
