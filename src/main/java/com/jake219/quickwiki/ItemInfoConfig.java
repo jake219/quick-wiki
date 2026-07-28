@@ -58,4 +58,15 @@ public interface ItemInfoConfig extends Config
     {
         return true;
     }
+
+    @ConfigItem(
+            keyName = "showGrandExchangeTrends",
+            name = "Grand Exchange chart & ticker",
+            description = "Show the Grand Exchange price history chart and price-change ticker for items.",
+            position = 3
+    )
+    default boolean showGrandExchangeTrends()
+    {
+        return true;
+    }
 }

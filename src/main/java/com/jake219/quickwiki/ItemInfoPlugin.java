@@ -273,6 +273,7 @@ public class ItemInfoPlugin extends Plugin
 
         panel = new ItemInfoPanel();
         panel.setShowTooltips(config.showTooltips());
+        panel.setShowGrandExchangeTrends(config.showGrandExchangeTrends());
 
         final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/com/jake219/quickwiki/icon.png");
 
@@ -411,9 +412,18 @@ public class ItemInfoPlugin extends Plugin
     @Subscribe
     public void onConfigChanged(ConfigChanged event)
     {
-        if ("quickwiki".equals(event.getGroup()) && "showTooltips".equals(event.getKey()))
+        if (!"quickwiki".equals(event.getGroup()))
+        {
+            return;
+        }
+
+        if ("showTooltips".equals(event.getKey()))
         {
             panel.setShowTooltips(config.showTooltips());
+        }
+        else if ("showGrandExchangeTrends".equals(event.getKey()))
+        {
+            panel.setShowGrandExchangeTrends(config.showGrandExchangeTrends());
         }
     }
 
