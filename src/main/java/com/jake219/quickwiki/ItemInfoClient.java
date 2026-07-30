@@ -178,6 +178,7 @@ public class ItemInfoClient
 
         public String currency;
         public String stock;
+        public String location;
     }
 
     public static class Material
@@ -1071,7 +1072,7 @@ public class ItemInfoClient
 
     private void fetchShopSources(String itemName, Consumer<List<ShopSource>> callback)
     {
-        String query = "bucket('storeline').select('sold_by','store_sell_price','store_currency','store_stock')"
+        String query = "bucket('storeline').select('sold_by','store_sell_price','store_currency','store_stock','sold_item_json')"
                 + ".where('sold_item','" + escapeForBucketQuery(itemName) + "').limit(500).run()";
 
         runBucketQuery(query, root ->
@@ -1090,6 +1091,7 @@ public class ItemInfoClient
                         ss.price = firstString(row, "store_sell_price");
                         ss.currency = firstString(row, "store_currency");
                         ss.stock = firstString(row, "store_stock");
+                        ss.location = parseShopLocation(row);
 
                         if (ss.shopName != null)
                         {
@@ -1104,6 +1106,40 @@ public class ItemInfoClient
             }
             callback.accept(results);
         });
+    }
+
+    // storeline rows carry a sold_item_json blob that includes the shop's Location
+    // (and Members / LeagueRegion) for the specific store version. Pull Location out
+    // and clean any wiki markup so it displays as a plain place name.
+    private String parseShopLocation(JsonObject row)
+    {
+        String rawJson = firstString(row, "sold_item_json");
+        if (rawJson == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            JsonObject blob = gson.fromJson(rawJson, JsonObject.class);
+            if (blob != null && blob.has("Location") && !blob.get("Location").isJsonNull())
+            {
+                String rawLoc = blob.get("Location").getAsString();
+                if (rawLoc != null && !rawLoc.trim().isEmpty())
+                {
+                    String cleaned = cleanWikiValue(rawLoc);
+                    if (cleaned != null && !cleaned.isEmpty() && !"Unknown".equals(cleaned))
+                    {
+                        return cleaned;
+                    }
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+
+        return null;
     }
 
     public void fetchCombatBonuses(String itemName, int itemId, Consumer<CombatBonuses> callback)

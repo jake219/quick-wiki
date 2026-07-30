@@ -3787,6 +3787,18 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         shopNameLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         row.add(shopNameLabel);
 
+        if (shop.location != null && !shop.location.trim().isEmpty())
+        {
+            JLabel locationLabel = new JLabel("<html>"
+                    + wrapTextManually("Location: " + shop.location.trim(), 160, FontManager.getRunescapeFont())
+                    + "</html>");
+            locationLabel.setFont(FontManager.getRunescapeFont());
+            locationLabel.setForeground(NEUTRAL);
+            locationLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+            row.add(Box.createVerticalStrut(2));
+            row.add(locationLabel);
+        }
+
         boolean isCoins = shop.currency == null || shop.currency.isEmpty()
                 || "coins".equalsIgnoreCase(shop.currency);
 
