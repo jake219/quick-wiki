@@ -1120,6 +1120,23 @@ public class ItemInfoPlugin extends Plugin
 
                         panel.setCombatStatsSectionVisible(false);
                         panel.setCombatStatsAvailable(null);
+
+                        // Objects (e.g. an ore vein) can drop items when interacted with.
+                        // Wire the drops loader here so the initial right-click Wiki lookup
+                        // populates the Sources tab, matching what displayObject() does on
+                        // back-navigation. Without this, objects showed no sources.
+                        SwingUtilities.invokeLater(() ->
+                        {
+                            if (navigationGeneration.get() != myGen)
+                            {
+                                return;
+                            }
+                            panel.setShopsSectionVisible(false);
+                            panel.setNpcDropsMode(true, "Drops");
+                            panel.setSourcesLoader(() ->
+                                    itemInfoClient.fetchNpcDrops(pageName, drops ->
+                                            loadNpcDropIconsAndDisplay(drops, myGen)));
+                        });
                     }
                 });
             });
@@ -1281,7 +1298,7 @@ public class ItemInfoPlugin extends Plugin
                     }));
 
             panel.setShopsSectionVisible(false);
-            panel.setNpcDropsMode(true, "Rewards");
+            panel.setNpcDropsMode(true, "Drops");
             panel.setSourcesLoader(() ->
                     itemInfoClient.fetchNpcDrops(objectName, drops ->
                             loadNpcDropIconsAndDisplay(drops, myGen)));
