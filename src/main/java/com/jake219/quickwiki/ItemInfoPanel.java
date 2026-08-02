@@ -124,6 +124,9 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
     private int playerCombatLevel = -1;
     private boolean showTooltips = true;
+    private boolean showGrandExchangeTrends = true;
+    private boolean hasMarketGraphData = false;
+    private boolean hasMarketTickerData = false;
 
     private Icon realCoinIcon;
     private Icon realWeightIcon;
@@ -918,9 +921,10 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         java.util.List<Integer> prices = m != null ? m.prices : null;
         java.util.List<Long> timestamps = m != null ? m.timestamps : null;
         boolean hasData = prices != null && prices.size() >= 2;
+        hasMarketGraphData = hasData;
 
         sparkline.setData(hasData ? prices : null, hasData ? timestamps : null);
-        priceGraphPanel.setVisible(hasData);
+        priceGraphPanel.setVisible(showGrandExchangeTrends && hasData);
 
         java.util.List<Ticker.Seg> segs = new ArrayList<>();
         if (m != null)
@@ -930,16 +934,16 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
             addChangeSeg(segs, "1M", m.change1M);
             addChangeSeg(segs, "1Y", m.change1Y);
         }
-        if (!segs.isEmpty())
+        hasMarketTickerData = !segs.isEmpty();
+        if (hasMarketTickerData)
         {
             priceTicker.setSegments(segs);
-            priceTicker.setVisible(true);
         }
         else
         {
             priceTicker.setSegments(null);
-            priceTicker.setVisible(false);
         }
+        priceTicker.setVisible(showGrandExchangeTrends && hasMarketTickerData);
 
         if (pendingPrice <= 0 && m != null)
         {
@@ -953,6 +957,17 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
                 priceSubLabel.setText(formatPrice(p) + " gp");
             }
         }
+
+        revalidate();
+        repaint();
+    }
+
+    public void setShowGrandExchangeTrends(boolean showGrandExchangeTrends)
+    {
+        this.showGrandExchangeTrends = showGrandExchangeTrends;
+
+        priceGraphPanel.setVisible(showGrandExchangeTrends && hasMarketGraphData);
+        priceTicker.setVisible(showGrandExchangeTrends && hasMarketTickerData);
 
         revalidate();
         repaint();
@@ -2655,9 +2670,11 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
         infoTable.removeAll();
         priceGraphPanel.setVisible(false);
+        hasMarketGraphData = false;
         sparkline.setData(null, null);
         priceTicker.setSegments(null);
         priceTicker.setVisible(false);
+        hasMarketTickerData = false;
         pendingPrice = price;
         pendingHighAlch = highAlch;
         pendingLowAlch = lowAlch;
@@ -3987,9 +4004,11 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         showLoadingImage();
         infoTable.removeAll();
         priceGraphPanel.setVisible(false);
+        hasMarketGraphData = false;
         sparkline.setData(null, null);
         priceTicker.setSegments(null);
         priceTicker.setVisible(false);
+        hasMarketTickerData = false;
         updatePropertiesVisibility();
         lastFullDescription = "Loading description...";
         descriptionArea.setText(lastFullDescription);
