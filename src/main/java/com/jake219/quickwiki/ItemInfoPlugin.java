@@ -919,7 +919,7 @@ public class ItemInfoPlugin extends Plugin
         {
 
             BufferedImage image = null;
-            int price = 0;
+            long price = 0;
             int highAlch = 0;
             int lowAlch = 0;
             int resolvedItemId = -1;
@@ -967,7 +967,7 @@ public class ItemInfoPlugin extends Plugin
             }
 
             final BufferedImage finalImage = image;
-            final int finalPrice = price;
+            final long finalPrice = price;
             final int finalHighAlch = highAlch;
             final int finalLowAlch = lowAlch;
             final int finalItemId = resolvedItemId;
@@ -1350,14 +1350,14 @@ public class ItemInfoPlugin extends Plugin
             clientThread.invoke(() ->
             {
                 BufferedImage image = itemManager.getImage(itemId, 1, false);
-                int price = itemManager.getItemPrice(itemId);
+                long price = itemManager.getItemPrice(itemId);
                 var comp = itemManager.getItemComposition(itemId);
                 int highAlch = comp.getHaPrice();
                 int lowAlch = (int) (comp.getPrice() * 0.4);
                 String realName = comp.getName();
 
                 final BufferedImage finalImage = image;
-                final int finalPrice = price;
+                final long finalPrice = price;
                 final int finalHighAlch = highAlch;
                 final int finalLowAlch = lowAlch;
 

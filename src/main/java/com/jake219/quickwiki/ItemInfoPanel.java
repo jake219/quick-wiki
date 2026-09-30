@@ -88,7 +88,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
     private String lastFullDescription = "";
 
-    private int pendingPrice;
+    private long pendingPrice;
     private int pendingHighAlch;
     private int pendingLowAlch;
     private boolean showFullDescription = false;
@@ -918,7 +918,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
     public void setMarket(ItemInfoClient.Market m)
     {
-        java.util.List<Integer> prices = m != null ? m.prices : null;
+        java.util.List<Long> prices = m != null ? m.prices : null;
         java.util.List<Long> timestamps = m != null ? m.timestamps : null;
         boolean hasData = prices != null && prices.size() >= 2;
         hasMarketGraphData = hasData;
@@ -947,9 +947,15 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
         if (pendingPrice <= 0 && m != null)
         {
-            Integer p = (m.instaBuy != null && m.instaSell != null)
-                    ? Math.max(m.instaBuy, m.instaSell)
-                    : (m.instaBuy != null ? m.instaBuy : m.instaSell);
+            Long p;
+            if (m.instaBuy != null && m.instaSell != null)
+            {
+                p = Math.max(m.instaBuy, m.instaSell);
+            }
+            else
+            {
+                p = m.instaBuy != null ? m.instaBuy : m.instaSell;
+            }
             if (p != null)
             {
                 priceSubLabel.setIcon(coinIcon());
@@ -2154,7 +2160,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         iconLabel.setIcon(new ImageIcon(placeholder));
     }
 
-    private String formatPrice(int value)
+    private String formatPrice(long value)
     {
         return String.format("%,d", value);
     }
@@ -2652,7 +2658,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
         return FontManager.getRunescapeBoldFont().deriveFont(size);
     }
 
-    public void showItem(String name, BufferedImage image, int price, int highAlch, int lowAlch)
+    public void showItem(String name, BufferedImage image, long price, int highAlch, int lowAlch)
     {
         ensureItemViewShown();
         nameLabel.setText("<html>" + wrapTextManually(name, 140, headerNameFont(name)) + "</html>");
@@ -4361,7 +4367,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
     private static class Sparkline extends JComponent
     {
-        private java.util.List<Integer> data;
+        private java.util.List<Long> data;
         private java.util.List<Long> times;
         private int hover = -1;
         private int prefH = 210;
@@ -4390,7 +4396,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
             });
         }
 
-        void setData(java.util.List<Integer> data, java.util.List<Long> times)
+        void setData(java.util.List<Long> data, java.util.List<Long> times)
         {
             this.data = data;
             this.times = times;
@@ -4436,14 +4442,14 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
             int h = getHeight();
             int graphH = h - DATE_H;
             int n = data.size();
-            int min = Integer.MAX_VALUE;
-            int max = Integer.MIN_VALUE;
-            for (int v : data)
+            long min = Long.MAX_VALUE;
+            long max = Long.MIN_VALUE;
+            for (long v : data)
             {
                 min = Math.min(min, v);
                 max = Math.max(max, v);
             }
-            double range = Math.max(1, max - min);
+            double range = Math.max(1L, max - min);
 
             int topPad = 24;
             int yBottom = graphH - 3;

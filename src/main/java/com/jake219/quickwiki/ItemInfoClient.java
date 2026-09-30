@@ -2502,10 +2502,10 @@ public class ItemInfoClient
 
     public static class Market
     {
-        public List<Integer> prices = new ArrayList<>();
+        public List<Long> prices = new ArrayList<>();
         public List<Long> timestamps = new ArrayList<>();
-        public Integer instaBuy;
-        public Integer instaSell;
+        public Long instaBuy;
+        public Long instaSell;
         public Integer buyLimit;
         public long todayVolume;
         public long avgVolume;
@@ -2717,7 +2717,7 @@ public class ItemInfoClient
                         JsonObject root = gson.fromJson(response.body().string(), JsonObject.class);
                         if (root != null && root.has("data") && root.get("data").isJsonArray())
                         {
-                            List<Integer> prices = new ArrayList<>();
+                            List<Long> prices = new ArrayList<>();
                             List<Long> times = new ArrayList<>();
                             List<Long> vols = new ArrayList<>();
                             parseSeries(root, prices, times, vols);
@@ -2772,7 +2772,7 @@ public class ItemInfoClient
                     if (response.isSuccessful() && response.body() != null)
                     {
                         JsonObject root = gson.fromJson(response.body().string(), JsonObject.class);
-                        List<Integer> prices = new ArrayList<>();
+                        List<Long> prices = new ArrayList<>();
                         List<Long> times = new ArrayList<>();
                         List<Long> vols = new ArrayList<>();
                         parseSeries(root, prices, times, vols);
@@ -2805,7 +2805,7 @@ public class ItemInfoClient
         });
     }
 
-    private void parseSeries(JsonObject root, List<Integer> prices, List<Long> times, List<Long> vols)
+    private void parseSeries(JsonObject root, List<Long> prices, List<Long> times, List<Long> vols)
     {
         if (root == null || !root.has("data") || !root.get("data").isJsonArray())
         {
@@ -2818,12 +2818,12 @@ public class ItemInfoClient
                 continue;
             }
             JsonObject point = el.getAsJsonObject();
-            Integer high = optInt(point, "avgHighPrice");
-            Integer low = optInt(point, "avgLowPrice");
+            Long high = optLong(point, "avgHighPrice");
+            Long low = optLong(point, "avgLowPrice");
             Long ts = optLong(point, "timestamp");
             Long hv = optLong(point, "highPriceVolume");
             Long lv = optLong(point, "lowPriceVolume");
-            Integer price;
+            Long price;
             if (high != null && low != null)
             {
                 price = (high + low) / 2;
@@ -2845,14 +2845,14 @@ public class ItemInfoClient
         }
     }
 
-    private void computeChanges(List<Integer> prices, Market m)
+    private void computeChanges(List<Long> prices, Market m)
     {
         int n = prices.size();
         if (n < 2)
         {
             return;
         }
-        int last = prices.get(n - 1);
+        long last = prices.get(n - 1);
         m.change1D = pctBack(prices, 1, last);
         m.change1W = pctBack(prices, 7, last);
         m.change1M = pctBack(prices, 30, last);
@@ -2860,13 +2860,13 @@ public class ItemInfoClient
         m.change1Y = n >= 350 ? pct(last, prices.get(0)) : null;
     }
 
-    private Double pctBack(List<Integer> prices, int daysBack, int last)
+    private Double pctBack(List<Long> prices, int daysBack, long last)
     {
         int idx = prices.size() - 1 - daysBack;
         return idx >= 0 ? pct(last, prices.get(idx)) : null;
     }
 
-    private Double pct(int last, int ref)
+    private Double pct(long last, long ref)
     {
         return ref > 0 ? (last - ref) * 100.0 / ref : null;
     }
@@ -2901,8 +2901,8 @@ public class ItemInfoClient
                             if (data.has(key))
                             {
                                 JsonObject o = data.getAsJsonObject(key);
-                                m.instaBuy = optInt(o, "high");
-                                m.instaSell = optInt(o, "low");
+                                m.instaBuy = optLong(o, "high");
+                                m.instaSell = optLong(o, "low");
                             }
                         }
                     }
