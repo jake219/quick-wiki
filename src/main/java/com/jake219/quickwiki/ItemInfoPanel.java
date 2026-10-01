@@ -3,6 +3,7 @@ package com.jake219.quickwiki;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 import javax.swing.*;
 import javax.swing.border.Border;
@@ -880,17 +881,7 @@ public class ItemInfoPanel extends PluginPanel implements Scrollable
 
     private void openInBrowser(String url)
     {
-        try
-        {
-            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE))
-            {
-                Desktop.getDesktop().browse(new java.net.URI(url));
-            }
-        }
-        catch (Exception e)
-        {
-            /*x*/;
-        }
+        LinkBrowser.browse(url);
     }
 
     private String officialWikiUrl(String pageName)
